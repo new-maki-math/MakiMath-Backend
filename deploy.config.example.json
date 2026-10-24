@@ -1,0 +1,25 @@
+{
+  "host": "server-ip",
+  "port": 22,
+  "username": "username",
+  "password": "password",
+  "remoteBaseDir": "/var/www/maki-math",
+  "backendPort": 3000,
+  "pm2Name": "maki-math-backend",
+  "setupDatabase": true,
+  "forceSchema": false,
+  "db": {
+    "name": "db_name",
+    "user": "db_username",
+    "password": "db_password"
+  },
+  "env": {
+    "NODE_ENV": "production",
+    "HOST": "127.0.0.1",
+    "PORT": "3000",
+    "TRUST_PROXY": "loopback",
+    "LOG_LEVEL": "info",
+    "JWT_SECRET": "JWT_SECRET_EXAMPLE",
+    "PAYLOAD_SECRET_KEY": "32_PAYLOAD_SECRET_KEY_EXAMPLE"
+  }
+}

@@ -1,0 +1,8 @@
+node_modules/
+cache/
+uploads/
+.env
+*.log
+
+# 部署配置含服务器密码，切勿提交
+deploy.config.json
