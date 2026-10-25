@@ -37,17 +37,20 @@ export default async function sectionRoutes(app) {
   app.get('/sections', async (req) => {
     const chapterId = toId(req.query.chapter_id, 'chapter_id')
     const res = await query(
-      `SELECT id, chapter_id, slug, tag, title, summary, pos, prereqs, source_hash,
-              length(source) AS source_len,
-              (source IS NOT NULL AND source <> '') AS has_source,
-              created_at, updated_at
-         FROM sections WHERE chapter_id = $1 ORDER BY pos, id`,
+      `SELECT s.id, s.chapter_id, s.slug, s.tag, s.title, s.summary, s.pos, s.prereqs, s.source_hash,
+              length(s.source) AS source_len,
+              (s.source IS NOT NULL AND s.source <> '') AS has_source,
+              (sa.id IS NOT NULL AND sa.enabled = true) AS has_animation,
+              s.created_at, s.updated_at
+         FROM sections s
+    LEFT JOIN section_animations sa ON sa.section_id = s.id
+        WHERE s.chapter_id = $1 ORDER BY s.pos, s.id`,
       [chapterId],
     )
     return res.rows
   })
 
-  // 详情，含原始 Typst 源码
+  // 详情，含原始 Typst 源码与动画信息
   app.get('/sections/:id', async (req) => {
     const res = await query(
       `SELECT s.*, ch.course_id, ch.title AS chapter_title, ch.pos AS chapter_pos,
@@ -64,7 +67,7 @@ export default async function sectionRoutes(app) {
     return row
   })
 
-  // 获取小节讲义正文与 AST
+  // 获取小节讲义正文、AST 与配套动画
   app.get('/sections/:id/doc', async (req) => {
     const res = await query(
       `SELECT s.*, ch.course_id, ch.title AS chapter_title, ch.tag AS chapter_tag,
@@ -79,8 +82,71 @@ export default async function sectionRoutes(app) {
     if (res.rowCount === 0) throw notFound('小节')
     const { course_status, ...meta } = res.rows[0]
     if (!req.user && course_status !== 'live') throw notFound('小节')
-    return { ...meta, doc: parseTypst(meta.source || '') }
+
+    // 查询对应小节的手绘交互动画（仅返回开启的）
+    const animRes = await query(
+      `SELECT id, section_id, enabled, title, cues, parts, steps, scenes_code, config, updated_at
+         FROM section_animations WHERE section_id = $1`,
+      [meta.id],
+    )
+    const animRow = animRes.rows[0]
+    const animation = animRow && animRow.enabled ? animRow : null
+
+    return { ...meta, doc: parseTypst(meta.source || ''), animation }
   })
+
+  // 获取小节动画（工作台编辑使用，无论是否开启均返回）
+  app.get('/sections/:id/animation', async (req) => {
+    const sectionId = toId(req.params.id)
+    const res = await query(
+      `SELECT id, section_id, enabled, title, cues, parts, steps, scenes_code, config, created_at, updated_at
+         FROM section_animations WHERE section_id = $1`,
+      [sectionId],
+    )
+    return res.rows[0] || null
+  })
+
+  // 更新或创建小节动画（工作台编辑使用）
+  app.put('/sections/:id/animation', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const sectionId = toId(req.params.id)
+    // 检查小节是否存在
+    const secRes = await query('SELECT id FROM sections WHERE id = $1', [sectionId])
+    if (secRes.rowCount === 0) throw notFound('小节')
+
+    const b = req.body ?? {}
+    const enabled = b.enabled !== undefined ? Boolean(b.enabled) : true
+    const title = typeof b.title === 'string' ? b.title : ''
+    const cues = typeof b.cues === 'string' ? b.cues : JSON.stringify(b.cues ?? [])
+    const parts = typeof b.parts === 'string' ? b.parts : JSON.stringify(b.parts ?? [])
+    const steps = typeof b.steps === 'string' ? b.steps : JSON.stringify(b.steps ?? [])
+    const scenesCode = typeof b.scenes_code === 'string' ? b.scenes_code : ''
+    const config = typeof b.config === 'string' ? b.config : JSON.stringify(b.config ?? { crop: { x: 0, y: 0, w: 1920, h: 960 } })
+
+    const res = await query(
+      `INSERT INTO section_animations (section_id, enabled, title, cues, parts, steps, scenes_code, config, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8::jsonb, now())
+       ON CONFLICT (section_id) DO UPDATE
+       SET enabled = EXCLUDED.enabled,
+           title = EXCLUDED.title,
+           cues = EXCLUDED.cues,
+           parts = EXCLUDED.parts,
+           steps = EXCLUDED.steps,
+           scenes_code = EXCLUDED.scenes_code,
+           config = EXCLUDED.config,
+           updated_at = now()
+       RETURNING *`,
+      [sectionId, enabled, title, cues, parts, steps, scenesCode, config],
+    )
+    return reply.code(200).send(res.rows[0])
+  })
+
+  // 删除小节动画
+  app.delete('/sections/:id/animation', { preHandler: [app.requireLogin] }, async (req) => {
+    const sectionId = toId(req.params.id)
+    await query('DELETE FROM section_animations WHERE section_id = $1', [sectionId])
+    return { ok: true }
+  })
+
 
   // 新建，pos 未给则排到末尾
   app.post('/sections', { preHandler: [app.requireLogin] }, async (req, reply) => {

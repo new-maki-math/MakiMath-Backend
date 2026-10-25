@@ -187,6 +187,23 @@ CREATE INDEX sections_fts_idx     ON sections USING gin (
   )
 );
 
+-- 小节手绘交互动画（存入数据库）
+CREATE TABLE section_animations (
+  id           bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  section_id   bigint      NOT NULL UNIQUE REFERENCES sections(id) ON DELETE CASCADE,
+  enabled      boolean     NOT NULL DEFAULT true,
+  title        text        NOT NULL DEFAULT '',
+  cues         jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  parts        jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  steps        jsonb       NOT NULL DEFAULT '[]'::jsonb,
+  scenes_code  text        NOT NULL DEFAULT '',
+  config       jsonb       NOT NULL DEFAULT '{"crop": {"x": 0, "y": 0, "w": 1920, "h": 960}}'::jsonb,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX section_animations_sec_id ON section_animations (section_id);
+
+
 
 -- ============================================================
 -- 3. 初始默认超级管理员
