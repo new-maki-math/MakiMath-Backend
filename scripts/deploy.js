@@ -426,7 +426,44 @@ EXTSQL
     psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$BACKEND_DIR/Database/schema.sql"
     echo "Database/schema.sql 已应用"
   else
-    echo "检测到业务表已存在，跳过 schema.sql（如需清库重建，请把 forceSchema 设为 DROP_AND_REBUILD）"
+    step "检测并应用增量数据库迁移"
+    echo "检测到业务表已存在，跳过全量 schema.sql，执行增量迁移检测..."
+
+    # 确保迁移记录表存在
+    psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
+      CREATE TABLE IF NOT EXISTS _schema_migrations (
+        name text PRIMARY KEY,
+        executed_at timestamptz NOT NULL DEFAULT now()
+      );
+    "
+
+    MIG_COUNT=0
+    if [ -d "$BACKEND_DIR/Database/migrations" ]; then
+      for mig_file in $(ls -1 "$BACKEND_DIR/Database/migrations"/*.sql 2>/dev/null | sort); do
+        [ -f "$mig_file" ] || continue
+        mig_name=$(basename "$mig_file")
+        mig_applied=$(psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -tA -c "
+          SELECT count(*) FROM _schema_migrations WHERE name = '$mig_name';
+        ")
+        if [ "$mig_applied" = "0" ]; then
+          echo "--> [执行迁移] $mig_name"
+          psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$mig_file"
+          psql -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO _schema_migrations (name) VALUES ('$mig_name');
+          "
+          echo "--> [迁移成功] $mig_name"
+          MIG_COUNT=$((MIG_COUNT + 1))
+        else
+          echo "增量迁移已就绪（跳过）: $mig_name"
+        fi
+      done
+    fi
+
+    if [ "$MIG_COUNT" -gt 0 ]; then
+      echo "增量迁移执行完毕，共应用 $MIG_COUNT 个新迁移脚本。"
+    else
+      echo "数据库结构已是最新，无待执行迁移。"
+    fi
   fi
   unset PGPASSWORD
 fi
