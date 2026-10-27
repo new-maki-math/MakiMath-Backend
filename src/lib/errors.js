@@ -1,4 +1,4 @@
-// 带 HTTP 状态码的错误
+// 业务错误包含响应状态
 export class HttpError extends Error {
   constructor(status, message, details) {
     super(message)
@@ -14,26 +14,32 @@ export const forbidden = (msg = '无权访问该资源') => new HttpError(403, m
 export const notFound = (what = '资源') => new HttpError(404, `${what}不存在`)
 export const conflict = (msg, details) => new HttpError(409, msg, details)
 
-// PostgreSQL 错误码到 HTTP 状态码的映射
+// 数据库错误映射到响应状态
 const PG_STATUS = {
-  '23001': 409, // 删除被 RESTRICT 挡住
-  '23502': 400, // 非空约束
-  '23503': 409, // 外键引用了不存在的记录
-  '23505': 409, // 唯一约束
-  '23514': 400, // 检查约束
-  '22P02': 400, // 参数格式错误
+  '23001': 409,
+  '23502': 400,
+  '23503': 409,
+  '23505': 409,
+  '23514': 400,
+  '22P02': 400,
+  '40001': 409,
+  '40P01': 409,
+  'P0001': 409,
 }
 
 const PG_HINT = {
   '23001': '该记录仍被下级数据引用，不能删除',
   '23502': '必填字段缺失',
-  '23503': '引用的记录不存在',
-  '23505': 'slug 或 pos 已被占用，请换一个试试',
+  '23503': '关联记录不存在或仍被引用',
+  '23505': '数据与现有记录冲突',
   '23514': '违反检查约束',
   '22P02': '参数格式不对，id 需要是数字',
+  '40001': '操作发生并发冲突请重试',
+  '40P01': '操作发生并发冲突请重试',
+  'P0001': '操作违反业务约束',
 }
 
-// 统一错误处理，输出 JSON
+// 统一返回业务错误
 export function errorHandler(err, req, reply) {
   if (err instanceof HttpError) {
     const body = { error: err.message }
@@ -45,8 +51,7 @@ export function errorHandler(err, req, reply) {
     return reply.code(400).send({ error: '请求参数不合法', details: err.validation })
   }
 
-  // Fastify 自身的请求错误（空 JSON 体、JSON 语法错误、body 过大等）自带 statusCode，
-  // 按 4xx 原样返回，否则会被下面的兜底吞成 500，把真正的原因藏掉
+  // 请求格式错误保留原有状态
   const fastifyStatus = Number(err.statusCode)
   if (Number.isInteger(fastifyStatus) && fastifyStatus >= 400 && fastifyStatus < 500) {
     return reply.code(fastifyStatus).send({ error: err.message })
@@ -55,8 +60,7 @@ export function errorHandler(err, req, reply) {
   const status = PG_STATUS[err.code]
   if (status) {
     return reply.code(status).send({
-      error: PG_HINT[err.code] ?? '数据库约束冲突',
-      detail: err.detail ?? err.message,
+      error: err.code === 'P0001' ? err.message : (PG_HINT[err.code] ?? '数据库约束冲突'),
     })
   }
 

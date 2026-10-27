@@ -1,0 +1,79 @@
+import * as service from '../services/knowledge.js'
+import { body, id, integer, string, slug, object, list, choice, animation } from '../lib/validate.js'
+
+export default async function knowledgeRoutes(app) {
+  app.get('/knowledge-points', async () => service.listPublic())
+  app.get('/knowledge-points/:id', async req => service.getPublic(id(req.params.id)))
+  app.get('/knowledge-points/:id/revisions/:revisionId', async req =>
+    service.getPublicRevision(id(req.params.id), id(req.params.revisionId)))
+  app.get('/knowledge-revisions/mine', { preHandler: [app.requireLogin] }, async req => service.myRevisions(req.user))
+  app.post('/knowledge-points', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const d = body(req.body, ['slug','title','source'], ['slug','title','source'])
+    slug(d.slug)
+    string(d.title, 200)
+    string(d.source, 200000, true)
+    const result = await service.create(req.user, d)
+    reply.code(201)
+    return result
+  })
+  app.post('/knowledge-points/:id/revisions', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const d = body(req.body, ['based_on_id'], ['based_on_id'])
+    const result = await service.createRevision(req.user, id(req.params.id), id(d.based_on_id))
+    reply.code(201)
+    return result
+  })
+  app.get('/knowledge-revisions/:id', { preHandler: [app.requireLogin] }, async req =>
+    service.getRevision(req.user, id(req.params.id)))
+  app.put('/knowledge-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['edit_version','title','summary','source','animation','metadata','change_note'],
+      ['edit_version','title','summary','source','animation','metadata','change_note'])
+    integer(d.edit_version, 1)
+    string(d.title, 200)
+    string(d.summary, 5000, true)
+    string(d.source, 200000, true)
+    if (d.animation !== null) animation(d.animation)
+    object(d.metadata)
+    string(d.change_note, 2000, true)
+    return service.save(req.user, id(req.params.id), d)
+  })
+  app.post('/knowledge-revisions/:id/submit', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['edit_version'], ['edit_version'])
+    return service.submit(req.user, id(req.params.id), integer(d.edit_version, 1))
+  })
+  app.get('/categories/:kind', async req =>
+    service.categories(choice(req.params.kind, ['knowledge','lecture'])))
+  app.post('/categories/:kind', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const kind = choice(req.params.kind, ['knowledge','lecture'])
+    const d = body(req.body, ['parent_id','slug','name','descr','pos'], ['slug','name'])
+    if (d.parent_id != null) id(d.parent_id)
+    slug(d.slug)
+    string(d.name, 200)
+    if (d.descr !== undefined) string(d.descr, 5000, true)
+    if (d.pos !== undefined) integer(d.pos)
+    const result = await service.createCategory(req.user, kind, d)
+    reply.code(201)
+    return result
+  })
+  app.put('/categories/:kind/:id', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['parent_id','name','descr','pos','status'], ['parent_id','name','descr','pos','status'])
+    if (d.parent_id !== null) id(d.parent_id)
+    string(d.name, 200)
+    string(d.descr, 5000, true)
+    integer(d.pos)
+    choice(d.status, ['active','archived'])
+    return service.updateCategory(req.user, choice(req.params.kind, ['knowledge','lecture']), id(req.params.id), d)
+  })
+  app.patch('/knowledge-points/:id/status', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['status'], ['status'])
+    return service.setPointStatus(req.user, id(req.params.id), choice(d.status, ['active','disabled','archived']))
+  })
+  app.put('/knowledge-points/:id/prerequisites', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['prerequisites'], ['prerequisites'])
+    return service.setPrerequisites(req.user, id(req.params.id), list(d.prerequisites, 100).map(id))
+  })
+  app.get('/knowledge-points/:id/prerequisites', async req => service.getPrerequisites(id(req.params.id)))
+  app.put('/knowledge-points/:id/categories', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['categories'], ['categories'])
+    return service.setCategories(req.user, id(req.params.id), list(d.categories, 100).map(id))
+  })
+}

@@ -6,151 +6,77 @@ import { query } from '../db/pool.js'
 import { unauthorized, forbidden } from '../lib/errors.js'
 import { normalizeIp } from '../lib/util.js'
 
-// 敏感字段脱敏工具
-function sanitizePayload(data) {
-  if (!data || typeof data !== 'object') return {}
-  if (Array.isArray(data)) return data.map(sanitizePayload)
+const sensitive = new Set([
+  'password', 'passwordhash', 'oldpassword', 'newpassword', 'token', 'refreshtoken', 'accesstoken',
+  'secret', 'invitecode', 'source', 'animation', 'metadata', 'chapters',
+])
 
-  const SENSITIVE_KEYS = new Set(['password', 'password_hash', 'token', 'refreshToken', 'secret'])
-  const copy = {}
-  for (const [k, v] of Object.entries(data)) {
-    if (SENSITIVE_KEYS.has(k.toLowerCase())) {
-      copy[k] = '***'
-    } else if (v && typeof v === 'object') {
-      copy[k] = sanitizePayload(v)
-    } else {
-      copy[k] = v
-    }
+function sanitizePayload(data) {
+  if (Array.isArray(data)) return data.map(sanitizePayload)
+  if (!data || typeof data !== 'object') return data
+  const result = {}
+  for (const [key, value] of Object.entries(data)) {
+    result[key] = sensitive.has(key.replace(/[_-]/g, '').toLowerCase()) ? '***' : sanitizePayload(value)
   }
-  return copy
+  return result
 }
 
-// 权限守卫：必须登录（超管或编者）
 export async function requireLogin(req) {
   req.needsAudit = true
-  if (!req.user) {
-    throw unauthorized('请先登录后再进行此操作')
-  }
+  if (!req.user) throw unauthorized('请先登录后再进行此操作')
 }
 
-// 权限守卫：必须超级管理员
 export async function requireAdmin(req) {
   req.needsAudit = true
-  if (!req.user) {
-    throw unauthorized('请先登录后再进行此操作')
-  }
-  if (req.user.role !== 'super_admin') {
-    throw forbidden('需要超级管理员权限')
-  }
-}
-
-// 权限守卫：检查编者是否有某课程的编辑权限（超管直接放行）
-export async function requireCourseEditor(req) {
-  req.needsAudit = true
-  if (!req.user) {
-    throw unauthorized('请先登录后再进行此操作')
-  }
-  if (req.user.role === 'super_admin') {
-    return
-  }
-
-  const courseId = Number(
-    req.params.courseId ?? req.params.id ?? req.body?.course_id ?? req.query?.course_id,
-  )
-  if (!courseId) {
-    throw forbidden('无法确定目标课程')
-  }
-
-  const { rowCount } = await query(
-    'SELECT 1 FROM course_editors WHERE course_id = $1 AND user_id = $2',
-    [courseId, req.user.id],
-  )
-  if (rowCount === 0) {
-    throw forbidden('您未被授权编辑该课程')
-  }
+  if (!req.user) throw unauthorized('请先登录后再进行此操作')
+  if (req.user.role !== 'super_admin') throw forbidden('需要管理员权限')
 }
 
 async function authPlugin(app) {
-  // 1. 注册 Cookie 支持
   await app.register(fastifyCookie)
+  await app.register(fastifyJwt, { secret: config.jwt.secret, sign: { expiresIn: config.jwt.expiresIn } })
+  if (!app.hasRequestDecorator('user')) app.decorateRequest('user', null)
+  app.decorateRequest('needsAudit', false)
+  app.decorateRequest('startTime', 0)
 
-  // 2. 注册 JWT 支持
-  await app.register(fastifyJwt, {
-    secret: config.jwt.secret,
-    sign: {
-      expiresIn: config.jwt.expiresIn,
-    },
-  })
-
-  // 3. 挂载 user 和 审计标记 到 request
-  if (!app.hasRequestDecorator('user')) {
-    app.decorateRequest('user', null)
-  }
-  if (!app.hasRequestDecorator('needsAudit')) {
-    app.decorateRequest('needsAudit', false)
-  }
-  if (!app.hasRequestDecorator('startTime')) {
-    app.decorateRequest('startTime', 0)
-  }
-
-  // 4. 记录请求进入时间戳
-  app.addHook('onRequest', async (req) => {
+  app.addHook('onRequest', async req => {
     req.startTime = Date.now()
   })
 
-  // 5. 软认证 Hook：无论有无 token 均不中断，有合法 token 时注入 req.user
-  app.addHook('preHandler', async (req) => {
-    const authHeader = req.headers.authorization
-    if (authHeader?.startsWith('Bearer ')) {
-      try {
-        const decoded = await req.jwtVerify()
-        req.user = decoded
-      } catch {
-        req.user = null
-      }
+  app.addHook('preHandler', async req => {
+    if (!req.headers.authorization?.startsWith('Bearer ')) return
+    let decoded
+    try {
+      decoded = await req.jwtVerify()
+    } catch {
+      req.user = null
+      return
     }
+    req.user = null
+    if (!Number.isSafeInteger(decoded.id) || decoded.id <= 0 || !Number.isSafeInteger(decoded.sid) || decoded.sid <= 0) return
+    const { rows } = await query(
+      `SELECT u.id, u.username, u.display_name, u.role FROM users u
+       JOIN user_sessions s ON s.user_id = u.id
+       WHERE u.id = $1 AND s.id = $2 AND u.status = 'active' AND s.expires_at > now()`,
+      [decoded.id, decoded.sid],
+    )
+    req.user = rows[0] ?? null
   })
 
-  // 6. 操作审计 Hook：凡是标记需要认证的接口，在响应结束时异步落库
   app.addHook('onResponse', async (req, reply) => {
     if (!req.needsAudit) return
-
-    const duration = Date.now() - (req.startTime || Date.now())
-    const userId = req.user?.id ?? null
-    const username = req.user?.username ?? (typeof req.body?.username === 'string' ? req.body.username.trim() : '')
-    const userRole = req.user?.role ?? ''
-    const method = req.method
-    const path = req.url.split('?')[0]
-    const statusCode = reply.statusCode
-    const ipAddress = normalizeIp(req.ip)
-    const userAgent = req.headers['user-agent'] ?? ''
-    const payload = sanitizePayload(req.body)
-
-    // 异步插入审计表，防止日志写入拖慢主业务
+    const payload = sanitizePayload(req.body ?? {})
     query(
-      `INSERT INTO audit_logs (user_id, username, user_role, method, path, status_code, duration_ms, ip_address, user_agent, payload)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)`,
-      [
-        userId,
-        username,
-        userRole,
-        method,
-        path,
-        statusCode,
-        duration,
-        ipAddress,
-        userAgent,
-        JSON.stringify(payload),
-      ],
-    ).catch((err) => {
-      req.log.error(`[audit] 审计日志写入失败: ${err.message}`)
-    })
+      `INSERT INTO audit_logs(user_id,username,user_role,method,path,status_code,duration_ms,ip_address,user_agent,payload)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)`,
+      [req.user?.id ?? null, req.user?.username ?? '', req.user?.role ?? '', req.method,
+        req.url.split('?')[0], reply.statusCode, Date.now() - req.startTime, normalizeIp(req.ip),
+        req.headers['user-agent'] ?? '', JSON.stringify(payload)],
+    ).catch(err => req.log.error({ err }, '审计记录写入失败'))
   })
 
-  // 7. 挂载装饰器供整个 Fastify 实例及子路由访问
   app.decorate('requireLogin', requireLogin)
   app.decorate('requireAdmin', requireAdmin)
-  app.decorate('requireCourseEditor', requireCourseEditor)
 }
 
 export default fp(authPlugin, { name: 'auth-plugin' })

@@ -1,14 +1,14 @@
 import pg from 'pg'
 import { config } from '../config.js'
 
-// pg 默认把 int8 解析成字符串，这里统一转成 Number
-const toNumber = (v) => (v === null ? null : Number(v))
+// 数据库整数必须在安全范围内
+const toNumber = (v) => {
+  if (v === null) return null
+  const n = Number(v)
+  if (!Number.isSafeInteger(n)) throw new Error('数据库整数超出安全范围')
+  return n
+}
 pg.types.setTypeParser(pg.types.builtins.INT8, toNumber)
-
-// int8[]，用于 prereqs 列
-pg.types.setTypeParser(1016, (v) =>
-  v === null ? null : v.slice(1, -1).split(',').filter((s) => s.length > 0).map(Number),
-)
 
 export const pool = new pg.Pool({ ...config.db, max: 10 })
 
@@ -16,12 +16,12 @@ pool.on('error', (err) => {
   console.error('[db] 空闲连接出错：', err.message)
 })
 
-// 单条查询，自动取还连接
+// 普通查询使用连接池
 export function query(text, params) {
   return pool.query(text, params)
 }
 
-// 事务。pos 重排依赖 DEFERRABLE 唯一约束，必须在事务内执行
+// 事务内共用同一数据库连接
 export async function tx(fn) {
   const client = await pool.connect()
   try {

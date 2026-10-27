@@ -1,0 +1,115 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { buildApp } from '../src/app.js'
+import { pool } from '../src/db/pool.js'
+import { encryptPayload } from '../src/lib/crypto.js'
+import { lectureAccess, knowledgeDraftAccess } from '../src/services/access.js'
+import { submit as submitLecture } from '../src/services/lectures.js'
+import { normalizeIp } from '../src/lib/util.js'
+import { animation } from '../src/lib/validate.js'
+
+test('讲义权限区分所有者与查看和编辑协作者', async () => {
+  const db = {
+    async query(sql, params) {
+      if (sql.includes('FROM lectures')) return { rows: [{ id: 1, owner_id: 10 }] }
+      return { rows: params[1] === 20 ? [{ permission: 'view' }] : params[1] === 30 ? [{ permission: 'edit' }] : [] }
+    },
+  }
+  await lectureAccess(db, 1, { id: 10, role: 'editor' }, 'owner', true)
+  await lectureAccess(db, 1, { id: 20, role: 'editor' }, 'view')
+  await assert.rejects(() => lectureAccess(db, 1, { id: 20, role: 'editor' }, 'edit'), { status: 403 })
+  await lectureAccess(db, 1, { id: 30, role: 'editor' }, 'edit')
+  await assert.rejects(() => lectureAccess(db, 1, { id: 30, role: 'editor' }, 'owner'), { status: 403 })
+  await assert.rejects(() => lectureAccess(db, 1, { id: 40, role: 'editor' }, 'view'), { status: 403 })
+  await lectureAccess(db, 1, { id: 40, role: 'super_admin' }, 'owner')
+})
+
+test('知识点草稿只允许贡献者或管理员操作', () => {
+  const revision = { contributor_id: 10 }
+  knowledgeDraftAccess(revision, { id: 10, role: 'editor' })
+  knowledgeDraftAccess(revision, { id: 20, role: 'super_admin' })
+  assert.throws(() => knowledgeDraftAccess(revision, { id: 20, role: 'editor' }), { status: 403 })
+  assert.throws(() => knowledgeDraftAccess(revision, null), { status: 401 })
+})
+
+test('客户端地址转换', () => {
+  assert.equal(normalizeIp('[::1]:8000'), '::1')
+  assert.equal(normalizeIp('127.0.0.1:8000'), '127.0.0.1')
+  assert.equal(normalizeIp('invalid'), null)
+})
+
+test('动画配置拒绝可执行场景代码', () => {
+  assert.deepEqual(animation({ steps: [{ title: '示例' }] }), { steps: [{ title: '示例' }] })
+  assert.throws(() => animation({ scenes_code: 'return 1' }), { status: 400 })
+  assert.throws(() => animation({ steps: [{ scenesCode: 'return 1' }] }), { status: 400 })
+})
+
+test('讲义提交拒绝旧版本和重复提交', async () => {
+  const originalConnect = pool.connect
+  let status = 'draft'
+  let version = 2
+  const client = {
+    async query(sql) {
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] }
+      if (sql.startsWith('SELECT lecture_id')) return { rows: [{ lecture_id: 1 }] }
+      if (sql.startsWith('SELECT * FROM lectures')) return { rows: [{ id: 1, owner_id: 10 }] }
+      if (sql.startsWith('SELECT permission')) return { rows: [] }
+      if (sql.startsWith('SELECT * FROM lecture_revisions')) return { rows: [{ id: 1, status, edit_version: version }] }
+      if (sql.startsWith('UPDATE lecture_revisions')) {
+        status = 'pending'
+        version++
+        return { rows: [{ id: 1, status, edit_version: version }] }
+      }
+      throw new Error('出现未预期的数据库操作')
+    },
+    release() {},
+  }
+  pool.connect = async () => client
+  try {
+    const user = { id: 10, role: 'editor' }
+    await assert.rejects(() => submitLecture(user, 1, 1), { status: 409 })
+    assert.equal((await submitLecture(user, 1, 2)).status, 'pending')
+    await assert.rejects(() => submitLecture(user, 1, 3), { status: 409 })
+  } finally {
+    pool.connect = originalConnect
+  }
+})
+
+test('路由鉴权和参数检查拒绝无权请求', async () => {
+  const originalQuery = pool.query
+  pool.query = async (sql, params) => {
+    if (sql.includes('JOIN user_sessions')) {
+      return { rows: params[1] === 1 ? [{ id: 10, username: 'editor', display_name: '', role: 'editor' }] : [] }
+    }
+    if (sql.startsWith('INSERT INTO audit_logs')) return { rows: [] }
+    throw new Error('测试不能访问真实数据库')
+  }
+  const app = await buildApp({ logger: false })
+  try {
+    await app.ready()
+    const token = app.jwt.sign({ id: 10, sid: 1, role: 'super_admin' })
+    const missing = await app.inject({ method: 'POST', url: '/api/lectures', payload: encryptPayload({ slug: 'demo', title: '讲义' }) })
+    assert.equal(missing.statusCode, 401)
+    const forbidden = await app.inject({ method: 'GET', url: '/api/reviews/lecture/pending', headers: { authorization: `Bearer ${token}` } })
+    assert.equal(forbidden.statusCode, 403)
+    const expiredToken = app.jwt.sign({ id: 10, sid: 2, role: 'super_admin' })
+    const expired = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: `Bearer ${expiredToken}` } })
+    assert.equal(expired.statusCode, 401)
+    const legacyToken = app.jwt.sign({ id: 10, role: 'super_admin' })
+    const legacy = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: `Bearer ${legacyToken}` } })
+    assert.equal(legacy.statusCode, 401)
+    const invalid = await app.inject({
+      method: 'POST', url: '/api/lectures', headers: { authorization: `Bearer ${token}` },
+      payload: encryptPayload({ slug: 'demo', title: '讲义', owner_id: 999 }),
+    })
+    assert.equal(invalid.statusCode, 400)
+    const old = await app.inject({ method: 'GET', url: '/api/courses' })
+    assert.equal(old.statusCode, 404)
+    const pubkey = await app.inject({ method: 'GET', url: '/api/auth/pubkey' })
+    assert.equal(pubkey.statusCode, 200)
+    assert.ok(pubkey.json().pubkey)
+  } finally {
+    await app.close()
+    pool.query = originalQuery
+  }
+})
