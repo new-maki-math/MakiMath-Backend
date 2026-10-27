@@ -1,6 +1,5 @@
 import { query, tx } from '../db/pool.js'
 import { badRequest, conflict, notFound } from '../lib/errors.js'
-import { extractKnowledgeReferences } from '../lib/knowledge-references.js'
 import { requireAdmin, requireUser, knowledgeDraftAccess } from './access.js'
 
 export async function listPublic() {
@@ -38,7 +37,6 @@ export async function getPublicRevision(pointId, revisionId) {
 
 export async function create(user, data) {
   requireUser(user)
-  extractKnowledgeReferences(data.source, { forbid: true })
   return tx(async (db) => {
     const point = (await db.query('INSERT INTO knowledge_points(slug, created_by) VALUES ($1,$2) RETURNING *', [data.slug, user.id])).rows[0]
     const revision = (await db.query(
@@ -86,7 +84,6 @@ export async function myRevisions(user) {
 
 export async function save(user, revisionId, data) {
   requireUser(user)
-  extractKnowledgeReferences(data.source, { forbid: true })
   return tx(async (db) => {
     const revision = (await db.query('SELECT * FROM knowledge_revisions WHERE id = $1 FOR UPDATE', [revisionId])).rows[0]
     if (!revision) throw notFound('知识点版本')

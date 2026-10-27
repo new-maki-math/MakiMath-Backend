@@ -2,48 +2,12 @@ import { randomUUID } from 'node:crypto'
 import { query, tx } from '../db/pool.js'
 import { conflict, forbidden, notFound } from '../lib/errors.js'
 import { requireUser, lectureAccess } from './access.js'
-import { extractKnowledgeReferences } from '../lib/knowledge-references.js'
-
-// 解析各小节源码并检查整个版本的实例标识
-export function parseSections(sections, normalize = false) {
-  const seen = new Set()
-  return sections.map(section => {
-    const parsed = extractKnowledgeReferences(section.source)
-    if (!normalize && parsed.source !== section.source) throw conflict('已保存的知识点引用缺少实例标识')
-    for (const ref of parsed.references) {
-      if (seen.has(ref.occurrence_id)) throw conflict('讲义中的知识点引用实例标识重复', { section: section.slug, occurrence_id: ref.occurrence_id, source_offset: ref.source_offset })
-      seen.add(ref.occurrence_id)
-    }
-    return { ...section, source: parsed.source, references: parsed.references }
-  })
-}
-
-// 批量读取当前公开知识点
-export async function resolveReferences(db, sections) {
-  const ids = [...new Set(sections.flatMap(section => section.references.map(ref => ref.knowledge_point_id)))]
-  const rows = ids.length ? (await db.query(
-    `SELECT p.id,p.slug AS knowledge_slug,r.id AS revision_id,r.title AS knowledge_title,
-            r.summary AS knowledge_summary,r.source AS knowledge_source,r.animation AS knowledge_animation,
-            r.metadata AS knowledge_metadata
-       FROM knowledge_points p JOIN knowledge_revisions r ON r.id=p.public_revision_id AND r.status='approved'
-      WHERE p.id=ANY($1::bigint[]) AND p.status='active'`, [ids],
-  )).rows : []
-  const points = new Map(rows.map(row => [row.id, row]))
-  return sections.map(section => ({ ...section, references: section.references.map(ref => {
-    const point = points.get(ref.knowledge_point_id)
-    return { ...ref, section_id: section.id, lecture_revision_id: section.lecture_revision_id,
-      knowledge_slug: point?.knowledge_slug ?? null, revision_id: point?.revision_id ?? null,
-      knowledge_title: point?.knowledge_title ?? null, knowledge_summary: point?.knowledge_summary ?? null,
-      knowledge_source: point?.knowledge_source ?? null, knowledge_animation: point?.knowledge_animation ?? null,
-      knowledge_metadata: point?.knowledge_metadata ?? null, availability: point ? 'available' : 'unavailable' }
-  }) }))
-}
 
 async function snapshot(db, revisionId) {
   const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
   if (!revision) throw notFound('讲义版本')
   const chapters = (await db.query('SELECT * FROM lecture_chapters WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
-  const sections = await resolveReferences(db, parseSections((await db.query('SELECT * FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows))
+  const sections = (await db.query('SELECT * FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
   return { revision, chapters: chapters.map(chapter => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapter.id) })) }
 }
 
@@ -107,23 +71,13 @@ export async function revisions(user, lectureId) {
 }
 
 async function insertTree(db, revisionId, chapters) {
-  const sections = parseSections(chapters.flatMap(chapter => chapter.sections), true)
-  const ids = [...new Set(sections.flatMap(section => section.references.map(ref => ref.knowledge_point_id)))]
-  const points = ids.length ? (await db.query('SELECT id FROM knowledge_points WHERE id=ANY($1::bigint[]) ORDER BY id FOR KEY SHARE', [ids])).rows : []
-  const existing = new Set(points.map(point => point.id))
-  for (const section of sections) {
-    const missing = section.references.find(ref => !existing.has(ref.knowledge_point_id))
-    if (missing) throw conflict('引用的知识点不存在', { section: section.slug, knowledge_point_id: missing.knowledge_point_id, source_offset: missing.source_offset })
-  }
-  let index = 0
   for (const [i, chapter] of chapters.entries()) {
     const ch = (await db.query(
       `INSERT INTO lecture_chapters(lecture_revision_id,occurrence_id,slug,tag,title,summary,pos)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
       [revisionId, chapter.occurrence_id ?? randomUUID(), chapter.slug, chapter.tag ?? '', chapter.title ?? '', chapter.summary ?? '', i],
     )).rows[0]
-    for (const [j] of chapter.sections.entries()) {
-      const section = sections[index++]
+    for (const [j, section] of chapter.sections.entries()) {
       await db.query(
         `INSERT INTO lecture_sections(lecture_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,source,pos)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
@@ -169,23 +123,8 @@ export async function save(user, revisionId, data) {
       [data.title,data.subtitle,data.descr,data.category_id,data.typst_version,data.metadata,data.change_note,revisionId],
     )
     await insertTree(db, revisionId, data.chapters)
-    const result = await snapshot(db, revisionId)
-    result.warnings = result.chapters.flatMap(ch => ch.sections.flatMap(sec => sec.references.filter(ref => ref.availability === 'unavailable').map(ref => ({ section_id: sec.id, occurrence_id: ref.occurrence_id, knowledge_point_id: ref.knowledge_point_id, source_offset: ref.source_offset }))))
-    return result
+    return snapshot(db, revisionId)
   })
-}
-
-// 检查引用并锁定知识点直到事务结束
-export async function ensureReferencesAvailable(db, revisionId) {
-  const sections = parseSections((await db.query('SELECT id,slug,source FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY id', [revisionId])).rows)
-  const ids = [...new Set(sections.flatMap(section => section.references.map(ref => ref.knowledge_point_id)))].sort((a,b) => a-b)
-  if (!ids.length) return
-  const points = (await db.query('SELECT id,status,public_revision_id FROM knowledge_points WHERE id=ANY($1::bigint[]) ORDER BY id FOR SHARE', [ids])).rows
-  const revisions = (await db.query("SELECT id FROM knowledge_revisions WHERE id=ANY($1::bigint[]) AND status='approved'", [points.map(point => point.public_revision_id).filter(Boolean)])).rows
-  const approved = new Set(revisions.map(row => row.id))
-  if (points.length !== ids.length || points.some(point => point.status !== 'active' || !approved.has(point.public_revision_id))) {
-    throw conflict('讲义包含不可用的知识点引用')
-  }
 }
 
 export async function submit(user, revisionId, version) {
@@ -207,7 +146,6 @@ export async function submit(user, revisionId, version) {
        ) SELECT id FROM history WHERE status='approved' ORDER BY depth LIMIT 1`, [row.based_on_id],
     )).rows[0]
     if ((ancestor?.id ?? null) !== (lecture.public_revision_id ?? null)) throw conflict('公开版本已变更请基于最新公开版本重新整理')
-    await ensureReferencesAvailable(db, revisionId)
     const tree = await snapshot(db, revisionId)
     const n = (await db.query('SELECT COALESCE(max(revision_no),0)+1 AS n FROM lecture_revisions WHERE lecture_id=$1', [row.lecture_id])).rows[0].n
     const saved = (await db.query(

@@ -2,8 +2,6 @@ import { query, tx } from '../db/pool.js'
 import { conflict, notFound } from '../lib/errors.js'
 import { requireAdmin } from './access.js'
 import { animation } from '../lib/validate.js'
-import { ensureReferencesAvailable } from './lectures.js'
-import { extractKnowledgeReferences } from '../lib/knowledge-references.js'
 
 export async function pending(user, kind) {
   requireAdmin(user)
@@ -27,8 +25,6 @@ export async function decide(user, kind, revisionId, data) {
     if (row.status !== 'pending') throw conflict('该版本不处于待审核状态')
     if (data.decision === 'approved') {
       if (knowledge && row.animation !== null) animation(row.animation)
-      if (knowledge) extractKnowledgeReferences(row.source, { forbid: true })
-      else await ensureReferencesAvailable(db, revisionId)
       const ancestor = (await db.query(
         `WITH RECURSIVE history AS (
            SELECT id,based_on_id,status,0 AS depth FROM ${table} WHERE id=$1

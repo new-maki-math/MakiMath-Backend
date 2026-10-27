@@ -3,7 +3,10 @@ import { body, id, integer, string, slug, object, list, choice, animation } from
 
 export default async function knowledgeRoutes(app) {
   app.get('/knowledge-points', async () => service.listPublic())
-  app.get('/knowledge-points/:id', async req => service.getPublic(id(req.params.id)))
+  app.get('/knowledge-points/:id', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.getPublic(id(req.params.id))
+  })
   app.get('/knowledge-points/:id/revisions/:revisionId', async req =>
     service.getPublicRevision(id(req.params.id), id(req.params.revisionId)))
   app.get('/knowledge-revisions/mine', { preHandler: [app.requireLogin] }, async req => service.myRevisions(req.user))
