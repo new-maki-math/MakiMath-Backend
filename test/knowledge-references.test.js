@@ -18,7 +18,7 @@ test('引用实例在移动后保留并拒绝重复标识', () => {
 })
 
 test('引用拒绝动态参数与知识点嵌套', () => {
-  for (const source of ['#mm-knowledge(1 + 2)', '#mm-knowledge(x)', '#mm-knowledge(0)', '#let x = mm-knowledge(1)']) {
+  for (const source of ['#mm-knowledge(1 + 2)', '#mm-knowledge(x)', '#mm-knowledge(0)', '#let x = mm-knowledge(1)', '#mm-knowledge(1).text', '/*mm-ref:11111111-1111-4111-8111-111111111111*/#mm-knowledge(1).text']) {
     assert.throws(() => extract(source), { status: 400 })
   }
   assert.throws(() => extract('#mm-knowledge(1)', { forbid: true }), { status: 400 })

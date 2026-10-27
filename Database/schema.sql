@@ -235,6 +235,7 @@ CREATE TABLE lecture_revisions (
   lecture_id    bigint      NOT NULL REFERENCES lectures(id) ON DELETE RESTRICT, -- 所属讲义标识
   revision_no   integer     NOT NULL CHECK (revision_no > 0), -- 讲义内版本序号
   based_on_id   bigint, -- 所依据的同一讲义版本
+  source_draft_id bigint, -- 待审快照的工作草稿标识
   category_id   bigint      REFERENCES lecture_categories(id) ON DELETE RESTRICT, -- 本版讲义分类
   title         text        NOT NULL DEFAULT '', -- 本版标题
   subtitle      text        NOT NULL DEFAULT '', -- 本版副标题
@@ -253,7 +254,11 @@ CREATE TABLE lecture_revisions (
   UNIQUE (lecture_id, id),
   CONSTRAINT lecture_revisions_base_fk FOREIGN KEY (lecture_id, based_on_id)
     REFERENCES lecture_revisions(lecture_id, id) ON DELETE RESTRICT,
+  CONSTRAINT lecture_revisions_source_draft_fk FOREIGN KEY (lecture_id, source_draft_id)
+    REFERENCES lecture_revisions(lecture_id, id) ON DELETE RESTRICT,
   CONSTRAINT lecture_revisions_no_self_base CHECK (based_on_id IS DISTINCT FROM id),
+  CONSTRAINT lecture_revisions_no_self_source CHECK (source_draft_id IS DISTINCT FROM id),
+  CONSTRAINT lecture_revisions_snapshot_source_check CHECK (status = 'draft' OR source_draft_id IS NOT NULL),
   CONSTRAINT lecture_revisions_times_check CHECK (
     (status = 'draft' AND submitted_at IS NULL AND reviewed_at IS NULL)
     OR (status = 'pending' AND submitted_at IS NOT NULL AND reviewed_at IS NULL)
@@ -267,6 +272,7 @@ ALTER TABLE lectures ADD CONSTRAINT lectures_public_revision_fk
 CREATE INDEX lecture_revisions_category_idx ON lecture_revisions (category_id);
 CREATE INDEX lecture_revisions_created_by_idx ON lecture_revisions (created_by);
 CREATE INDEX lecture_revisions_review_idx ON lecture_revisions (status, submitted_at);
+CREATE UNIQUE INDEX lecture_revisions_one_pending_idx ON lecture_revisions (lecture_id) WHERE status = 'pending';
 CREATE INDEX lecture_revisions_title_trgm_idx ON lecture_revisions USING gin (title gin_trgm_ops);
 
 -- 讲义章节属于确定的讲义版本
@@ -438,10 +444,21 @@ BEGIN
     RETURN NEW;
   END IF;
   IF NEW.id IS DISTINCT FROM OLD.id
-     OR NEW.based_on_id IS DISTINCT FROM OLD.based_on_id
      OR NEW.revision_no IS DISTINCT FROM OLD.revision_no
      OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
     RAISE EXCEPTION '版本身份与来源不可修改';
+  END IF;
+  IF NEW.based_on_id IS DISTINCT FROM OLD.based_on_id THEN
+    IF TG_TABLE_NAME <> 'lecture_revisions' OR OLD.status <> 'draft' OR NEW.status <> 'draft' THEN
+      RAISE EXCEPTION '版本来源不可修改';
+    END IF;
+    IF NOT EXISTS (
+      SELECT 1 FROM lecture_revisions r JOIN lectures l ON l.public_revision_id = r.id
+      WHERE r.id = NEW.based_on_id AND r.source_draft_id = OLD.id
+        AND r.status = 'approved' AND l.id = OLD.lecture_id
+    ) THEN
+      RAISE EXCEPTION '草稿只能跟进由自身发布的版本';
+    END IF;
   END IF;
   IF TG_TABLE_NAME = 'knowledge_revisions' THEN
     IF NEW.knowledge_point_id IS DISTINCT FROM OLD.knowledge_point_id
@@ -449,7 +466,8 @@ BEGIN
       RAISE EXCEPTION '知识点版本归属与贡献者不可修改';
     END IF;
   ELSE
-    IF NEW.lecture_id IS DISTINCT FROM OLD.lecture_id OR NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+    IF NEW.lecture_id IS DISTINCT FROM OLD.lecture_id OR NEW.created_by IS DISTINCT FROM OLD.created_by
+       OR NEW.source_draft_id IS DISTINCT FROM OLD.source_draft_id THEN
       RAISE EXCEPTION '讲义版本归属与创建人不可修改';
     END IF;
   END IF;

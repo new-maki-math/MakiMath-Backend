@@ -78,7 +78,7 @@
 | POST | `/lectures/:id/revisions` | 提交 `based_on_id`，复制完整版本和小节源码生成草稿 |
 | GET | `/lecture-revisions/:id` | 读取有权访问的完整版本 |
 | PUT | `/lecture-revisions/:id` | 以完整目录树替换草稿 |
-| POST | `/lecture-revisions/:id/submit` | 提交 `edit_version` 进入审核 |
+| POST | `/lecture-revisions/:id/submit` | 提交草稿 `edit_version`，生成独立待审快照并返回 `snapshot` 和 `draft_edit_version` |
 | GET | `/lectures/:id/collaborators` | 有权查看讲义的用户读取协作者 |
 | PUT | `/lectures/:id/collaborators/:userId` | 所有者或管理员提交 `permission`，取值为 `view` 或 `edit` |
 | DELETE | `/lectures/:id/collaborators/:userId` | 所有者或管理员移除协作者 |
@@ -116,7 +116,7 @@
 
 服务端为新引用补充源码标识，例如 `/*mm-ref:68de080f-4265-411b-8986-deb93f09d1c1*/#mm-knowledge(1)`。保存响应返回规范化后的 `source`，前端必须使用返回值覆盖编辑内容。移动引用时标识和宏一起移动；复制时副本应删除标识以生成新的实例，重复标识会报错。删除标识后该次引用被视为新实例。章节和小节的 `occurrence_id` 同样应在保存时保留。
 
-保存不存在的知识点会失败；停用或尚未公开的知识点允许保存在草稿中，响应顶层 `warnings` 列出小节、实例、知识点和位置。提交及管理员批准前重新检查引用，存在不可用项会返回 409。提交后目录、源码和引用关系不可修改。
+保存不存在的知识点会失败；停用或尚未公开的知识点允许保存在草稿中，响应顶层 `warnings` 列出小节、实例、知识点和位置。提交及管理员批准前重新检查引用，存在不可用项会返回 409。提交基于已保存草稿创建独立快照，冻结目录、源码和引用关系；原草稿继续编辑。每份讲义同一时间最多有一个待审核快照，并发提交只有一次成功。审核使用返回的 `snapshot.id`；审核通过后发布快照，同时更新原草稿的来源版本和并发号，前端须重新读取草稿。驳回不会改变公开版本。
 
 阅读响应的小节含 `source` 和 `references`，每条引用有 `occurrence_id`、`knowledge_point_id`、`source_offset`、`source_length`、`availability`；位置使用 JavaScript UTF-16 代码单元并相对于规范化源码。可用时附有当前公开版本的 `revision_id`、`knowledge_title`、`knowledge_summary`、`knowledge_source`、`knowledge_animation` 和 `knowledge_metadata`，不可用时 `availability` 为 `unavailable` 且内容字段为空。前端必须显式展示不可用占位，不得跳过或回退旧版本。多次引用相同知识点有不同实例标识。
 

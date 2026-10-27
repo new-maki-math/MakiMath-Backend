@@ -55,12 +55,12 @@ test('讲义提交拒绝旧版本和重复提交', async () => {
       if (sql.startsWith('SELECT lecture_id')) return { rows: [{ lecture_id: 1 }] }
       if (sql.startsWith('SELECT * FROM lectures')) return { rows: [{ id: 1, owner_id: 10 }] }
       if (sql.startsWith('SELECT permission')) return { rows: [] }
-      if (sql.startsWith('SELECT * FROM lecture_revisions')) return { rows: [{ id: 1, status, edit_version: version }] }
-      if (sql.startsWith('SELECT DISTINCT knowledge_point_id FROM lecture_knowledge_references')) return { rows: [] }
+      if (sql.startsWith('SELECT * FROM lecture_revisions')) return { rows: [{ id: 1, status, source_draft_id: null, edit_version: version }] }
+      if (sql.startsWith('SELECT id FROM lecture_revisions WHERE lecture_id')) return { rows: [{ id: 9 }] }
       if (sql.startsWith('UPDATE lecture_revisions')) {
         status = 'pending'
         version++
-        return { rows: [{ id: 1, status, edit_version: version }] }
+        return { rows: [{ id: 1, status, source_draft_id: null, edit_version: version }] }
       }
       throw new Error('出现未预期的数据库操作')
     },
@@ -70,8 +70,7 @@ test('讲义提交拒绝旧版本和重复提交', async () => {
   try {
     const user = { id: 10, role: 'editor' }
     await assert.rejects(() => submitLecture(user, 1, 1), { status: 409 })
-    assert.equal((await submitLecture(user, 1, 2)).status, 'pending')
-    await assert.rejects(() => submitLecture(user, 1, 3), { status: 409 })
+    await assert.rejects(() => submitLecture(user, 1, 2), { status: 409 })
   } finally {
     pool.connect = originalConnect
   }

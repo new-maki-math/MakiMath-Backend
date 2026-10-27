@@ -30,7 +30,7 @@ export function extractKnowledgeReferences(source, options = {}) {
     }
     const pointId = Number(valueText)
     if (!Number.isSafeInteger(pointId)) throw badRequest('知识点标识超出范围', { offset: node.from })
-    if (source[node.from - 1] !== '#') throw badRequest('知识点引用必须使用独立宏调用', { offset: node.from })
+    if (node.node.prevSibling?.name !== 'Hash') throw badRequest('知识点引用必须使用独立宏调用', { offset: node.from })
     if (options.forbid) throw badRequest('知识点正文不允许引用其他知识点', { offset: node.from - 1 })
     const hash = node.node.prevSibling
     const previous = hash?.name === 'Hash' ? hash.prevSibling : null

@@ -181,12 +181,31 @@ export async function submit(user, revisionId, version) {
   return tx(async (db) => {
     const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
     if (!initial) throw notFound('讲义版本')
-    await lectureAccess(db, initial.lecture_id, user, 'edit', true)
+    const lecture = await lectureAccess(db, initial.lecture_id, user, 'edit', true)
     const row = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
-    if (row.status !== 'draft') throw conflict('该版本已提交')
+    if (row.status !== 'draft' || row.source_draft_id !== null) throw conflict('只能提交工作草稿')
     if (row.edit_version !== version) throw conflict('草稿已被修改请重新加载')
+    const pending = (await db.query("SELECT id FROM lecture_revisions WHERE lecture_id=$1 AND status='pending'", [row.lecture_id])).rows
+    if (pending.length) throw conflict('讲义已有待审核快照')
+    const ancestor = (await db.query(
+      `WITH RECURSIVE history AS (
+         SELECT id,based_on_id,status,0 AS depth FROM lecture_revisions WHERE id=$1
+         UNION ALL
+         SELECT r.id,r.based_on_id,r.status,h.depth+1 FROM lecture_revisions r JOIN history h ON r.id=h.based_on_id
+       ) SELECT id FROM history WHERE status='approved' ORDER BY depth LIMIT 1`, [row.based_on_id],
+    )).rows[0]
+    if ((ancestor?.id ?? null) !== (lecture.public_revision_id ?? null)) throw conflict('公开版本已变更请基于最新公开版本重新整理')
     await ensureReferencesAvailable(db, revisionId)
-    return (await db.query("UPDATE lecture_revisions SET status='pending',edit_version=edit_version+1 WHERE id=$1 RETURNING *", [revisionId])).rows[0]
+    const tree = await snapshot(db, revisionId)
+    const n = (await db.query('SELECT COALESCE(max(revision_no),0)+1 AS n FROM lecture_revisions WHERE lecture_id=$1', [row.lecture_id])).rows[0].n
+    const saved = (await db.query(
+      `INSERT INTO lecture_revisions(lecture_id,revision_no,based_on_id,source_draft_id,category_id,title,subtitle,descr,typst_version,metadata,change_note,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+      [row.lecture_id,n,lecture.public_revision_id,row.id,row.category_id,row.title,row.subtitle,row.descr,row.typst_version,row.metadata,row.change_note,user.id],
+    )).rows[0]
+    await insertTree(db, saved.id, tree.chapters)
+    const submitted = (await db.query("UPDATE lecture_revisions SET status='pending' WHERE id=$1 RETURNING *", [saved.id])).rows[0]
+    return { snapshot: submitted, draft_edit_version: row.edit_version }
   })
 }
 

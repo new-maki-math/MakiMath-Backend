@@ -49,6 +49,7 @@ export async function decide(user, kind, revisionId, data) {
         await db.query('UPDATE knowledge_points SET public_revision_id=$1 WHERE id=$2', [revisionId, row.knowledge_point_id])
       } else {
         await db.query("UPDATE lectures SET public_revision_id=$1, publication_status='published' WHERE id=$2", [revisionId, row.lecture_id])
+        if (row.source_draft_id) await db.query("UPDATE lecture_revisions SET based_on_id=$1,edit_version=edit_version+1 WHERE id=$2 AND status='draft'", [revisionId,row.source_draft_id])
       }
     }
     return review
