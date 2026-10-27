@@ -1,5 +1,5 @@
 -- 本脚本用于初始化空数据库
--- 知识点与讲义分别使用独立身份和版本
+-- 知识点和讲义分别维护独立身份
 -- 讲义源码引用知识点永久标识
 -- 提交审核的内容版本不可继续编辑
 -- 个人讲义与批注及掌握状态由浏览器本地保存
@@ -116,14 +116,17 @@ CREATE TABLE knowledge_points (
   id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 知识点永久标识
   slug               text        NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'), -- 知识点别名
   status             text        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'archived')), -- 知识点生命周期状态
-  public_revision_id bigint, -- 当前公开版本标识
-  created_by         bigint      REFERENCES users(id) ON DELETE RESTRICT, -- 知识点创建人
+  title              text        NOT NULL CHECK (btrim(title) <> ''), -- 知识点标题
+  source             text        NOT NULL CHECK (btrim(source) <> ''), -- 知识点正文
+  created_by         bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 知识点创建人
+  updated_by         bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 最近维护人
   created_at         timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at         timestamptz NOT NULL DEFAULT now() -- 更新时间
 );
 
 CREATE INDEX knowledge_points_status_idx ON knowledge_points (status);
 CREATE INDEX knowledge_points_created_by_idx ON knowledge_points (created_by);
+CREATE INDEX knowledge_points_title_trgm_idx ON knowledge_points USING gin (title gin_trgm_ops);
 
 -- 一个知识点可以属于多个知识分类
 CREATE TABLE knowledge_point_categories (
@@ -134,59 +137,6 @@ CREATE TABLE knowledge_point_categories (
 );
 
 CREATE INDEX knowledge_point_categories_category_idx ON knowledge_point_categories (category_id, knowledge_point_id);
-
--- 公共正文与动画保存为知识点版本
-CREATE TABLE knowledge_revisions (
-  id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 知识点版本标识
-  knowledge_point_id bigint      NOT NULL REFERENCES knowledge_points(id) ON DELETE RESTRICT, -- 所属知识点标识
-  revision_no        integer     NOT NULL CHECK (revision_no > 0), -- 知识点内版本序号
-  based_on_id        bigint, -- 所依据的同一知识点版本
-  title              text        NOT NULL DEFAULT '', -- 本版标题
-  summary            text        NOT NULL DEFAULT '', -- 本版摘要
-  source             text        NOT NULL DEFAULT '', -- 本版公共正文源码
-  animation          jsonb       CHECK (jsonb_typeof(animation) = 'object' AND NOT (animation ? 'scenes_code')), -- 本版动画配置
-  metadata           jsonb       NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'), -- 本版渲染配置
-  change_note        text        NOT NULL DEFAULT '', -- 修改说明
-  contributor_id     bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 本版贡献者标识
-  edit_version       integer     NOT NULL DEFAULT 1 CHECK (edit_version > 0), -- 草稿并发版本号
-  status             text        NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'pending', 'approved', 'rejected')), -- 版本审核状态
-  submitted_at       timestamptz, -- 提交审核时间
-  reviewed_at        timestamptz, -- 完成审核时间
-  created_at         timestamptz NOT NULL DEFAULT now(), -- 创建时间
-  updated_at         timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  UNIQUE (knowledge_point_id, revision_no),
-  UNIQUE (knowledge_point_id, id),
-  CONSTRAINT knowledge_revisions_base_fk FOREIGN KEY (knowledge_point_id, based_on_id)
-    REFERENCES knowledge_revisions(knowledge_point_id, id) ON DELETE RESTRICT,
-  CONSTRAINT knowledge_revisions_no_self_base CHECK (based_on_id IS DISTINCT FROM id),
-  CONSTRAINT knowledge_revisions_times_check CHECK (
-    (status = 'draft' AND submitted_at IS NULL AND reviewed_at IS NULL)
-    OR (status = 'pending' AND submitted_at IS NOT NULL AND reviewed_at IS NULL)
-    OR (status IN ('approved', 'rejected') AND submitted_at IS NOT NULL AND reviewed_at IS NOT NULL AND reviewed_at >= submitted_at)
-  )
-);
-
-ALTER TABLE knowledge_points ADD CONSTRAINT knowledge_points_public_revision_fk
-  FOREIGN KEY (id, public_revision_id)
-  REFERENCES knowledge_revisions(knowledge_point_id, id) ON DELETE RESTRICT;
-CREATE INDEX knowledge_revisions_contributor_idx ON knowledge_revisions (contributor_id, created_at DESC);
-CREATE INDEX knowledge_revisions_review_idx ON knowledge_revisions (status, submitted_at);
-CREATE INDEX knowledge_revisions_title_trgm_idx ON knowledge_revisions USING gin (title gin_trgm_ops);
-CREATE INDEX knowledge_revisions_search_idx ON knowledge_revisions USING gin (
-  (setweight(to_tsvector('simple', title), 'A') || setweight(to_tsvector('simple', source), 'B'))
-);
-
--- 审核记录绑定一个确定的知识点版本
-CREATE TABLE knowledge_reviews (
-  id                    bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 审核记录标识
-  knowledge_revision_id bigint      NOT NULL UNIQUE REFERENCES knowledge_revisions(id) ON DELETE RESTRICT, -- 被审核的版本标识
-  reviewer_id           bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 审核人标识
-  decision              text        NOT NULL CHECK (decision IN ('approved', 'rejected')), -- 审核结论
-  comment               text        NOT NULL DEFAULT '', -- 审核意见
-  created_at            timestamptz NOT NULL DEFAULT now() -- 审核时间
-);
-
-CREATE INDEX knowledge_reviews_reviewer_idx ON knowledge_reviews (reviewer_id, created_at DESC);
 
 -- 知识点前置关系独立于讲义编排
 CREATE TABLE knowledge_prerequisites (
@@ -440,30 +390,17 @@ BEGIN
       RAISE EXCEPTION '草稿只能跟进由自身发布的版本';
     END IF;
   END IF;
-  IF TG_TABLE_NAME = 'knowledge_revisions' THEN
-    IF NEW.knowledge_point_id IS DISTINCT FROM OLD.knowledge_point_id
-       OR NEW.contributor_id IS DISTINCT FROM OLD.contributor_id THEN
-      RAISE EXCEPTION '知识点版本归属与贡献者不可修改';
-    END IF;
-  ELSE
-    IF NEW.lecture_id IS DISTINCT FROM OLD.lecture_id OR NEW.created_by IS DISTINCT FROM OLD.created_by
-       OR NEW.source_draft_id IS DISTINCT FROM OLD.source_draft_id THEN
-      RAISE EXCEPTION '讲义版本归属与创建人不可修改';
-    END IF;
+  IF NEW.lecture_id IS DISTINCT FROM OLD.lecture_id OR NEW.created_by IS DISTINCT FROM OLD.created_by
+     OR NEW.source_draft_id IS DISTINCT FROM OLD.source_draft_id THEN
+    RAISE EXCEPTION '讲义版本归属与创建人不可修改';
   END IF;
   IF OLD.status = 'draft' THEN
     IF NEW.status = 'pending' THEN
       IF btrim(NEW.title) = '' THEN
         RAISE EXCEPTION '提交审核前必须填写标题';
       END IF;
-      IF TG_TABLE_NAME = 'knowledge_revisions' THEN
-        IF btrim(NEW.source) = '' THEN
-          RAISE EXCEPTION '提交审核前必须填写知识点正文';
-        END IF;
-      ELSE
-        IF NOT EXISTS (SELECT 1 FROM lecture_sections WHERE lecture_revision_id = NEW.id AND btrim(source) <> '') THEN
-          RAISE EXCEPTION '提交审核前必须编排讲义内容';
-        END IF;
+      IF NOT EXISTS (SELECT 1 FROM lecture_sections WHERE lecture_revision_id = NEW.id AND btrim(source) <> '') THEN
+        RAISE EXCEPTION '提交审核前必须编排讲义内容';
       END IF;
       NEW.submitted_at := clock_timestamp();
       NEW.reviewed_at := NULL;
@@ -477,15 +414,9 @@ BEGIN
        IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'reviewed_at', 'updated_at']) THEN
       RAISE EXCEPTION '审核不能修改提交版本的内容';
     END IF;
-    IF TG_TABLE_NAME = 'knowledge_revisions' THEN
-      SELECT EXISTS (
-        SELECT 1 FROM knowledge_reviews WHERE knowledge_revision_id = OLD.id AND decision = NEW.status
-      ) INTO review_exists;
-    ELSE
-      SELECT EXISTS (
-        SELECT 1 FROM lecture_reviews WHERE lecture_revision_id = OLD.id AND decision = NEW.status
-      ) INTO review_exists;
-    END IF;
+    SELECT EXISTS (
+      SELECT 1 FROM lecture_reviews WHERE lecture_revision_id = OLD.id AND decision = NEW.status
+    ) INTO review_exists;
     IF NOT review_exists THEN
       RAISE EXCEPTION '必须通过审核记录更新版本状态';
     END IF;
@@ -540,13 +471,8 @@ BEGIN
     RAISE EXCEPTION '永久身份标识不可修改';
   END IF;
   IF NEW.public_revision_id IS NOT NULL THEN
-    IF TG_TABLE_NAME = 'knowledge_points' THEN
-      SELECT status INTO revision_status FROM knowledge_revisions
-       WHERE id = NEW.public_revision_id AND knowledge_point_id = NEW.id FOR SHARE;
-    ELSE
-      SELECT status INTO revision_status FROM lecture_revisions
-       WHERE id = NEW.public_revision_id AND lecture_id = NEW.id FOR SHARE;
-    END IF;
+    SELECT status INTO revision_status FROM lecture_revisions
+     WHERE id = NEW.public_revision_id AND lecture_id = NEW.id FOR SHARE;
     IF revision_status IS DISTINCT FROM 'approved' THEN
       RAISE EXCEPTION '公开入口必须指向本体的已审核通过版本';
     END IF;
@@ -568,11 +494,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.reviewer_id AND role = 'super_admin' AND status = 'active') THEN
     RAISE EXCEPTION '审核人必须为有效超级管理员';
   END IF;
-  IF TG_TABLE_NAME = 'knowledge_reviews' THEN
-    SELECT status INTO revision_status FROM knowledge_revisions WHERE id = NEW.knowledge_revision_id FOR UPDATE;
-  ELSE
-    SELECT status INTO revision_status FROM lecture_revisions WHERE id = NEW.lecture_revision_id FOR UPDATE;
-  END IF;
+  SELECT status INTO revision_status FROM lecture_revisions WHERE id = NEW.lecture_revision_id FOR UPDATE;
   IF revision_status IS DISTINCT FROM 'pending' THEN
     RAISE EXCEPTION '只能审核待审核版本';
   END IF;
@@ -585,11 +507,20 @@ $$;
 CREATE FUNCTION apply_content_review() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  IF TG_TABLE_NAME = 'knowledge_reviews' THEN
-    UPDATE knowledge_revisions SET status = NEW.decision WHERE id = NEW.knowledge_revision_id;
-  ELSE
-    UPDATE lecture_revisions SET status = NEW.decision WHERE id = NEW.lecture_revision_id;
+  UPDATE lecture_revisions SET status = NEW.decision WHERE id = NEW.lecture_revision_id;
+  RETURN NEW;
+END;
+$$;
+
+-- 知识点永久身份和创建信息不可修改
+CREATE FUNCTION guard_knowledge_point() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.created_by IS DISTINCT FROM OLD.created_by
+     OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION '知识点身份与创建信息不可修改';
   END IF;
+  NEW.updated_at := clock_timestamp();
   RETURN NEW;
 END;
 $$;
@@ -625,8 +556,6 @@ CREATE TRIGGER lecture_categories_guard BEFORE INSERT OR UPDATE ON lecture_categ
 CREATE TRIGGER knowledge_prerequisites_guard BEFORE INSERT OR UPDATE ON knowledge_prerequisites
   FOR EACH ROW EXECUTE FUNCTION guard_knowledge_prerequisite();
 
-CREATE TRIGGER knowledge_revisions_guard BEFORE INSERT OR UPDATE OR DELETE ON knowledge_revisions
-  FOR EACH ROW EXECUTE FUNCTION guard_content_revision();
 CREATE TRIGGER lecture_revisions_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_revisions
   FOR EACH ROW EXECUTE FUNCTION guard_content_revision();
 CREATE TRIGGER lecture_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_chapters
@@ -634,22 +563,18 @@ CREATE TRIGGER lecture_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON lectu
 CREATE TRIGGER lecture_sections_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_sections
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
 
-CREATE TRIGGER knowledge_points_public_guard BEFORE INSERT OR UPDATE ON knowledge_points
-  FOR EACH ROW EXECUTE FUNCTION guard_public_revision();
+CREATE TRIGGER knowledge_points_guard BEFORE UPDATE ON knowledge_points
+  FOR EACH ROW EXECUTE FUNCTION guard_knowledge_point();
 CREATE TRIGGER lectures_public_guard BEFORE INSERT OR UPDATE ON lectures
   FOR EACH ROW EXECUTE FUNCTION guard_public_revision();
-CREATE TRIGGER knowledge_reviews_guard BEFORE INSERT OR UPDATE OR DELETE ON knowledge_reviews
-  FOR EACH ROW EXECUTE FUNCTION guard_content_review();
 CREATE TRIGGER lecture_reviews_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_reviews
   FOR EACH ROW EXECUTE FUNCTION guard_content_review();
-CREATE TRIGGER knowledge_reviews_apply AFTER INSERT ON knowledge_reviews
-  FOR EACH ROW EXECUTE FUNCTION apply_content_review();
 CREATE TRIGGER lecture_reviews_apply AFTER INSERT ON lecture_reviews
   FOR EACH ROW EXECUTE FUNCTION apply_content_review();
 
 -- 审核通过后由服务端在事务中更新公开入口
 -- 推荐标记由服务端按发布策略单独设置
--- 讲义读取知识点当前公开版本
+-- 讲义展示当前有效的知识点
 -- 已提交版本和审核记录需要保留以支持追溯
 -- 内容关联的账号应优先停用以保留归属和贡献记录
 -- 管理员账号由部署流程创建并设置独立密码

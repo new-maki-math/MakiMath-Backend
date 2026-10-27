@@ -1,47 +1,37 @@
 import * as service from '../services/knowledge.js'
-import { body, id, integer, string, slug, object, list, choice, animation } from '../lib/validate.js'
+import { body, id, integer, string, slug, list, choice } from '../lib/validate.js'
 
 export default async function knowledgeRoutes(app) {
-  app.get('/knowledge-points', async () => service.listPublic())
+  app.get('/knowledge-points', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.listPublic()
+  })
   app.get('/knowledge-points/:id', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.getPublic(id(req.params.id))
   })
-  app.get('/knowledge-points/:id/revisions/:revisionId', async req =>
-    service.getPublicRevision(id(req.params.id), id(req.params.revisionId)))
-  app.get('/knowledge-revisions/mine', { preHandler: [app.requireLogin] }, async req => service.myRevisions(req.user))
+  app.get('/knowledge-points/manage', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.manage(req.user)
+  })
+  app.get('/knowledge-points/manage/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.getManaged(req.user, id(req.params.id))
+  })
   app.post('/knowledge-points', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['slug','title','source'], ['slug','title','source'])
     slug(d.slug)
     string(d.title, 200)
-    string(d.source, 200000, true)
+    string(d.source, 200000)
     const result = await service.create(req.user, d)
     reply.code(201)
     return result
   })
-  app.post('/knowledge-points/:id/revisions', { preHandler: [app.requireLogin] }, async (req, reply) => {
-    const d = body(req.body, ['based_on_id'], ['based_on_id'])
-    const result = await service.createRevision(req.user, id(req.params.id), id(d.based_on_id))
-    reply.code(201)
-    return result
-  })
-  app.get('/knowledge-revisions/:id', { preHandler: [app.requireLogin] }, async req =>
-    service.getRevision(req.user, id(req.params.id)))
-  app.put('/knowledge-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
-    const d = body(req.body, ['edit_version','title','summary','source','animation','metadata','change_note'],
-      ['edit_version','title','summary','source','animation','metadata','change_note'])
-    integer(d.edit_version, 1)
+  app.put('/knowledge-points/:id', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['title','source'], ['title','source'])
     string(d.title, 200)
-    string(d.summary, 5000, true)
-    string(d.source, 200000, true)
-    if (d.animation !== null) animation(d.animation)
-    object(d.metadata)
-    string(d.change_note, 2000, true)
+    string(d.source, 200000)
     return service.save(req.user, id(req.params.id), d)
-  })
-  app.post('/knowledge-revisions/:id/submit', { preHandler: [app.requireLogin] }, async req => {
-    const d = body(req.body, ['edit_version'], ['edit_version'])
-    return service.submit(req.user, id(req.params.id), integer(d.edit_version, 1))
   })
   app.get('/categories/:kind', async req =>
     service.categories(choice(req.params.kind, ['knowledge','lecture'])))

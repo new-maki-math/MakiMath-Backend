@@ -6,7 +6,7 @@
 
 - 基础路径为 `/api`。
 - 除公钥接口外，请求继续使用现有通信加解密协议。客户端使用 `GET /api/auth/pubkey` 获取服务端公钥；请求体加密为 `{ "d": "..." }`，成功响应也按同一协议解密。错误响应为普通 JSON。
-- 登录后使用 `Authorization: Bearer <access_token>`。所有身份和权限由服务端确认，请求不能指定所有者、贡献者或审核人。
+- 登录后使用 `Authorization: Bearer <access_token>`。所有身份和权限由服务端确认，请求不能指定所有者、维护人或审核人。
 - 返回错误格式为 `{ "error": "说明" }`。常见状态码为 400 参数错误、401 未登录或会话失效、403 无权限、404 不存在或不可公开、409 版本或业务冲突。
 - 账号被停用或会话注销后，已有访问令牌立即失效。刷新令牌每次刷新时轮换。
 - 资源标识为正整数。草稿的 `edit_version` 是乐观并发版本号，保存或提交时必须传入最近一次读取返回的值。成功操作后使用新返回值；遇到 409 应重新读取并解决冲突。
@@ -30,41 +30,34 @@
 | PATCH | `/users/:id/status` | 管理员提交 `status`，取值为 `active` 或 `disabled` |
 | GET | `/audit-logs?limit=20` | 管理员读取审计记录，最多 100 条 |
 
-邀请码的 `role` 可以是 `editor` 或 `super_admin`。首个管理员需要由部署流程创建，初始化脚本不提供默认密码。
+邀请码的 `role` 可以是 `editor` 或 `super_admin`。本地可使用 `pn run admin:init` 初始化管理员。
 
 ## 知识点
 
+知识点由 `super_admin` 直接维护，保存后立即对外生效。普通编者不能创建或修改知识点，未登录用户可读取有效知识点。知识点只包含永久 ID、别名、标题、Typst 正文、分类、前置关系、状态和维护记录，不再有知识点版本、简介、动画或内容 metadata。
+
 | 方法 | 路径 | 请求体或说明 |
 | --- | --- | --- |
-| GET | `/knowledge-points` | 公开知识点列表 |
-| GET | `/knowledge-points/:id` | 公开知识点当前版本 |
-| GET | `/knowledge-points/:id/revisions/:revisionId` | 读取该知识点已审核版本 |
-| POST | `/knowledge-points` | 登录用户提交 `slug`、`title`、`source`，返回 `point` 和首个草稿 `revision` |
-| GET | `/knowledge-revisions/mine` | 当前贡献者的版本列表 |
-| GET | `/knowledge-revisions/:id` | 贡献者或管理员读取非公开版本，已审核版本可由登录用户读取 |
-| POST | `/knowledge-points/:id/revisions` | 提交 `based_on_id`，复制版本创建当前用户的草稿 |
-| PUT | `/knowledge-revisions/:id` | 完整保存草稿 |
-| POST | `/knowledge-revisions/:id/submit` | 提交 `edit_version` 进入审核 |
-| GET | `/knowledge-points/:id/prerequisites` | 获取可公开的前置知识点 |
+| GET | `/knowledge-points` | 公开有效知识点列表，返回 `id`、`slug`、`title` |
+| GET | `/knowledge-points/:id` | 公开有效知识点详情，返回 `id`、`slug`、`title`、`source` 和 `categories` |
+| GET | `/knowledge-points/manage` | 管理员读取所有状态的知识点列表 |
+| GET | `/knowledge-points/manage/:id` | 管理员读取任意状态的知识点详情及维护记录 |
+| POST | `/knowledge-points` | 管理员提交 `slug`、`title`、`source`，返回新知识点 |
+| PUT | `/knowledge-points/:id` | 管理员提交 `title`、`source`，立即更新 |
+| GET | `/knowledge-points/:id/prerequisites` | 获取有效的前置知识点 |
 | PUT | `/knowledge-points/:id/prerequisites` | 管理员提交 `{ "prerequisites": [1, 2] }` |
 | PUT | `/knowledge-points/:id/categories` | 管理员提交 `{ "categories": [1, 2] }` |
 | PATCH | `/knowledge-points/:id/status` | 管理员提交 `status`，取值为 `active`、`disabled` 或 `archived` |
 
-知识点草稿保存请求体字段全部必填：
+创建示例：
 
 ```json
-{
-  "edit_version": 1,
-  "title": "数列极限的定义",
-  "summary": "",
-  "source": "知识点正文",
-  "animation": null,
-  "metadata": {},
-  "change_note": "补充定义"
-}
+{ "slug": "sequence-limit", "title": "数列极限的定义", "source": "知识点正文" }
 ```
 
-`animation` 可以为对象或 `null`，任何层级都不允许包含 `scenes_code` 或同名变体。现有前端会执行该字段，暂时禁用以保护读者。`metadata` 为对象。已提交版本不可直接修改或再次提交。创建新版本时只能复制已提交版本，以保证来源版本内容稳定。
+内容编辑请求只需要 `title` 与 `source`。标题和正文不能为空，维护人从登录身份取得。内容更新采用最后一次成功写入的结果，当前没有并发冲突提示。停用或归档后公开详情返回 404，管理员仍可通过管理接口查看并恢复。分类和前置关系由管理员维护，前置关系替换在事务中锁定所属知识点，数据库拒绝循环依赖。
+
+知识点公开列表、详情、管理查询及搜索设置 `Cache-Control: no-store`。本分支没有知识地图接口；尚未合并的地图功能需按此模型同步，不提供知识点 `revision_id` 或 `summary`。
 
 ## 讲义
 
@@ -114,11 +107,11 @@
 
 保存体中的每个小节只包含完整的 `source`，后端按普通文本原样保存，不解析、改写或校验其中的知识点引用。章节和小节自身的 `occurrence_id` 仍应在后续保存时保留。
 
-前端展示时识别源码中的 `#mm-knowledge(1)`，通过 `GET /api/knowledge-points/1` 读取当前公开知识点。知识点不存在、停用、归档或尚未公开时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前公开版本。
+前端展示时识别源码中的 `#mm-knowledge(1)`，通过 `GET /api/knowledge-points/1` 读取当前有效知识点。知识点不存在、停用或归档时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前内容。
 
 后端不会为引用生成实例标识，不返回引用 `references` 或引用 `warnings`，也不限制重复引用、复制和剪切。保存及审核流程不检查引用目标是否存在或公开；引用格式问题不妨碍源码保存。前端只需在渲染讲义时处理能识别的引用，首阶段不递归展开知识点正文中的引用。已存源码中的旧注释也不会被后端自动删除。
 
-提交基于已保存草稿创建独立审核快照，冻结目录和原样源码，原草稿继续编辑。每份讲义同一时间最多有一个待审核快照，并发提交只有一次成功。审核使用返回的 `snapshot.id`；审核通过后发布快照，同时更新原草稿的来源版本和并发号，前端须重新读取草稿并保留本地未保存输入，发生冲突时提示作者处理。驳回不会改变公开版本。知识点正文不属于快照，前端再次请求时读取当前公开版本。
+提交基于已保存草稿创建独立审核快照，冻结目录和原样源码，原草稿继续编辑。每份讲义同一时间最多有一个待审核快照，并发提交只有一次成功。审核使用返回的 `snapshot.id`；审核通过后发布快照，同时更新原草稿的来源版本和并发号，前端须重新读取草稿并保留本地未保存输入，发生冲突时提示作者处理。驳回不会改变公开版本。知识点正文不属于快照，前端再次请求时读取当前有效内容。
 
 查看协作者只读，编辑协作者可以修改和提交；所有者或管理员可管理协作者及上下架。讲义必须先有审核通过的公开版本才能上架。下架或归档会取消推荐标记。
 
@@ -129,7 +122,7 @@
 | GET | `/reviews/:kind/pending` | 管理员查看待审版本 |
 | POST | `/reviews/:kind/:id` | 管理员提交 `decision` 和 `comment` |
 
-`kind` 为 `knowledge` 或 `lecture`；`decision` 为 `approved` 或 `rejected`。审核记录与状态转换在同一事务完成。通过知识点审核会更新该知识点的公开版本；通过讲义审核会发布该完整讲义版本。推荐标记独立管理，不因审核通过自动开启。
+`kind` 仅支持 `lecture`；`decision` 为 `approved` 或 `rejected`。审核记录与状态转换在同一事务完成。通过讲义审核会发布该完整讲义版本。推荐标记独立管理，不因审核通过自动开启。
 
 审核通过时会检查草稿所基于的最近一个已审核版本是否仍是当前公开版本。若公开版本已变化，接口返回 409，作者应基于当前公开版本重新整理并提交。驳回不会改变当前公开版本。当前实现允许管理员审核自己的提交，是否禁止自审需要产品确认。
 
@@ -157,3 +150,5 @@
 前置知识点并发替换可单独执行 `node --test test/prerequisites.integration.test.js`，使用相同的独立测试数据库和环境变量。
 
 讲义搜索匹配讲义标题、简介和小节原始源码，不展开引用知识点的正文。知识点标题和正文作为知识点搜索结果返回。
+
+目前讲义没有动画配置字段或动画接口。原知识点版本中的动画能力不属于新知识点模型，讲义动画关联方式尚待另行设计。

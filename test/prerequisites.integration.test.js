@@ -22,7 +22,7 @@ test('并发替换前置关系只保留一次完整提交', { skip: !enabled, ti
       ['prerequisites-' + suffix],
     )).rows[0]
     const points = (await pool.query(
-      'INSERT INTO knowledge_points(slug,created_by) VALUES ($1,$5),($2,$5),($3,$5),($4,$5) RETURNING id',
+      "INSERT INTO knowledge_points(slug,title,source,created_by,updated_by) VALUES ($1,'测试','正文',$5,$5),($2,'测试','正文',$5,$5),($3,'测试','正文',$5,$5),($4,'测试','正文',$5,$5) RETURNING id",
       ['target-' + suffix, 'old-' + suffix, 'first-' + suffix, 'second-' + suffix, admin.id],
     )).rows.map(row => row.id)
     const [pointId, oldId, firstId, secondId] = points

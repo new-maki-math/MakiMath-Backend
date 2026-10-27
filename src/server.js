@@ -10,6 +10,9 @@ try {
     `SELECT EXISTS (
        SELECT 1 FROM information_schema.columns
         WHERE table_schema=current_schema() AND table_name='lecture_revisions' AND column_name='edit_version'
+     ) AND EXISTS (
+       SELECT 1 FROM information_schema.columns
+        WHERE table_schema=current_schema() AND table_name='knowledge_points' AND column_name='source'
      ) AS ready`,
   )
   if (!schema.rows[0].ready) throw new Error('数据库尚未应用新的初始化结构')

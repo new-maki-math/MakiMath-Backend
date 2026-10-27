@@ -44,16 +44,21 @@ test('知识点审核与讲义发布完整流程', { skip: !enabled }, async () 
       tokens.push(login.data.access_token)
     }
     const [admin, editor, outsider] = tokens
-    const knowledge = await call('POST', '/knowledge-points', { slug: 'point-' + suffix, title: '定义', source: '正文' }, editor)
+    assert.equal((await call('POST', '/knowledge-points', { slug: 'denied-' + suffix, title: '定义', source: '正文' }, editor)).status, 403)
+    const knowledge = await call('POST', '/knowledge-points', { slug: 'point-' + suffix, title: '定义', source: '正文' }, admin)
     assert.equal(knowledge.status, 201, JSON.stringify(knowledge.data))
-    const pointId = knowledge.data.point.id
-    const knowledgeId = knowledge.data.revision.id
-    assert.equal((await call('GET', '/knowledge-points/' + pointId)).status, 404)
-    assert.equal((await call('POST', `/knowledge-revisions/${knowledgeId}/submit`, { edit_version: 1 }, editor)).status, 200)
-    assert.equal((await call('POST', `/reviews/knowledge/${knowledgeId}`, { decision: 'approved', comment: '' }, outsider)).status, 403)
-    assert.equal((await call('POST', `/reviews/knowledge/${knowledgeId}`, { decision: 'approved', comment: '' }, admin)).status, 201)
-    const later = await call('POST', `/knowledge-points/${pointId}/revisions`, { based_on_id: knowledgeId }, editor)
-    assert.equal(later.status, 201)
+    const pointId = knowledge.data.id
+    assert.equal((await call('GET', '/knowledge-points/' + pointId)).data.source, '正文')
+    assert.equal((await call('PUT', '/knowledge-points/' + pointId, { title: '定义', source: '越权修改' }, editor)).status, 403)
+    assert.equal((await call('GET', '/knowledge-points/manage', undefined, editor)).status, 403)
+    assert.equal((await call('GET', '/knowledge-points/manage', undefined, admin)).status, 200)
+    assert.equal((await call('GET', '/knowledge-revisions/mine', undefined, admin)).status, 404)
+    assert.equal((await call('POST', '/reviews/knowledge/1', { decision: 'approved', comment: '' }, admin)).status, 400)
+    assert.equal((await call('PATCH', `/knowledge-points/${pointId}/status`, { status: 'disabled' }, editor)).status, 403)
+    const point2 = await call('POST', '/knowledge-points', { slug: 'pre-' + suffix, title: '前置', source: '前置正文' }, admin)
+    assert.equal(point2.status, 201)
+    assert.equal((await call('PUT', `/knowledge-points/${pointId}/prerequisites`, { prerequisites: [point2.data.id] }, admin)).status, 200)
+    assert.equal((await call('PUT', `/knowledge-points/${point2.data.id}/prerequisites`, { prerequisites: [pointId] }, admin)).status, 409)
 
     const created = await call('POST', '/lectures', { slug: 'lecture-' + suffix, title: '讲义' }, editor)
     assert.equal(created.status, 201, JSON.stringify(created.data))
@@ -110,15 +115,9 @@ test('知识点审核与讲义发布完整流程', { skip: !enabled }, async () 
     assert.equal(published.data.chapters[0].sections[0].source, draft.chapters[0].sections[0].source)
     assert.equal((await call('GET', '/knowledge-points/' + pointId)).status, 404)
     assert.equal((await call('PATCH', `/knowledge-points/${pointId}/status`, { status: 'active' }, admin)).status, 200)
-    await assert.rejects(() => pool.query('DELETE FROM knowledge_revisions WHERE id=$1', [knowledgeId]))
-    const update = {
-      edit_version: later.data.edit_version, title: '定义', summary: '', source: '修订正文',
-      animation: null, metadata: {}, change_note: '更新',
-    }
-    const updated = await call('PUT', `/knowledge-revisions/${later.data.id}`, update, editor)
+    const updated = await call('PUT', '/knowledge-points/' + pointId, { title: '定义', source: '修订正文' }, admin)
     assert.equal(updated.status, 200)
-    assert.equal((await call('POST', `/knowledge-revisions/${later.data.id}/submit`, { edit_version: updated.data.edit_version }, editor)).status, 200)
-    assert.equal((await call('POST', `/reviews/knowledge/${later.data.id}`, { decision: 'approved', comment: '' }, admin)).status, 201)
+    assert.equal(updated.data.updated_by, knowledge.data.created_by)
     const unchanged = await call('GET', '/lectures/' + lectureId)
     assert.equal(unchanged.data.chapters[0].sections[0].source, draft.chapters[0].sections[0].source)
     assert.equal((await call('GET', '/knowledge-points/' + pointId)).data.source, '修订正文')

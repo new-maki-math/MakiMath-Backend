@@ -29,10 +29,3 @@ export async function lectureAccess(db, lectureId, user, permission = 'view', lo
   if (permission === 'view' && !readable) throw forbidden('没有讲义查看权限')
   return lecture
 }
-
-export function knowledgeDraftAccess(revision, user) {
-  requireUser(user)
-  if (user.role !== 'super_admin' && revision.contributor_id !== user.id) {
-    throw forbidden('只能操作自己提交的知识点版本')
-  }
-}

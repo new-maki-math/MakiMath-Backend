@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { buildApp } from '../src/app.js'
 import { pool } from '../src/db/pool.js'
 import { encryptPayload } from '../src/lib/crypto.js'
-import { lectureAccess, knowledgeDraftAccess } from '../src/services/access.js'
+import { lectureAccess } from '../src/services/access.js'
 import { submit as submitLecture } from '../src/services/lectures.js'
-import { setPrerequisites } from '../src/services/knowledge.js'
+import { setPrerequisites, create as createKnowledge } from '../src/services/knowledge.js'
 import { normalizeIp } from '../src/lib/util.js'
 import { animation } from '../src/lib/validate.js'
 
@@ -25,12 +25,9 @@ test('讲义权限区分所有者与查看和编辑协作者', async () => {
   await lectureAccess(db, 1, { id: 40, role: 'super_admin' }, 'owner')
 })
 
-test('知识点草稿只允许贡献者或管理员操作', () => {
-  const revision = { contributor_id: 10 }
-  knowledgeDraftAccess(revision, { id: 10, role: 'editor' })
-  knowledgeDraftAccess(revision, { id: 20, role: 'super_admin' })
-  assert.throws(() => knowledgeDraftAccess(revision, { id: 20, role: 'editor' }), { status: 403 })
-  assert.throws(() => knowledgeDraftAccess(revision, null), { status: 401 })
+test('知识点维护只允许管理员操作', async () => {
+  await assert.rejects(() => createKnowledge({ id: 10, role: 'editor' }, {}), { status: 403 })
+  await assert.rejects(() => createKnowledge(null, {}), { status: 401 })
 })
 
 test('客户端地址转换', () => {
