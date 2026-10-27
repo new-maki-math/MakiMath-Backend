@@ -18,6 +18,12 @@ export default async function knowledgeRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     return service.getManaged(req.user, id(req.params.id))
   })
+  app.post('/knowledge-points/import', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const d = body(req.body, ['category_id','data'], ['category_id','data'])
+    const result = await service.importPoints(req.user, id(d.category_id), d.data)
+    reply.code(201)
+    return result
+  })
   app.post('/knowledge-points', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['slug','title','source'], ['slug','title','source'])
     slug(d.slug)

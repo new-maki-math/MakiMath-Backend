@@ -43,6 +43,7 @@
 | GET | `/knowledge-points/manage` | 管理员读取所有状态的知识点列表，包括全部关联分类的 `category_ids` |
 | GET | `/knowledge-points/manage/:id` | 管理员读取任意状态的知识点详情及维护记录 |
 | POST | `/knowledge-points` | 管理员提交 `slug`、`title`、`source`，返回新知识点 |
+| POST | `/knowledge-points/import` | 管理员向有效一级分类原子导入分类、知识点及前置关系 |
 | PUT | `/knowledge-points/:id` | 管理员提交 `title`、`source`，立即更新 |
 | GET | `/knowledge-points/:id/prerequisites` | 获取有效的前置知识点 |
 | PUT | `/knowledge-points/:id/prerequisites` | 管理员提交 `{ "prerequisites": [1, 2] }` |
@@ -60,6 +61,45 @@
 管理列表的 `category_ids` 为该知识点所有直接关联的分类永久 ID，按 ID 升序排列，包括已归档分类；无关联时为 `[]`。知识点自身无论是 `active`、`disabled` 还是 `archived` 都会返回。`GET /categories/knowledge` 只返回有效分类，因此不在分类接口结果中的 ID 仍可能是已归档的现有关联，前端不能把它当成不存在并在整体替换分类时自动删除。`PUT /knowledge-points/:id/categories` 会整体替换关联，若不打算移除归档分类，应一并保留这些 ID。管理详情接口暂不返回 `category_ids`，管理列表是该字段的数据来源。
 
 知识点公开列表、详情、管理查询及搜索设置 `Cache-Control: no-store`。本分支没有知识地图接口；尚未合并的地图功能需按此模型同步，不提供知识点 `revision_id` 或 `summary`。
+
+### 知识点批量导入
+
+`POST /api/knowledge-points/import` 使用现有请求加密，解密后的请求体为：
+
+```json
+{
+  "category_id": 8,
+  "data": {
+    "schema_version": 1,
+    "categories": [
+      { "id": "calculus", "parent_id": null, "slug": "calculus", "name": "一元微积分", "pos": 0 },
+      { "id": "limits", "parent_id": "calculus", "slug": "calculus-limits", "name": "极限", "pos": 0 }
+    ],
+    "points": [
+      { "id": "L03-01", "slug": "sequence-limit", "title": "数列极限", "source": "完整 Typst 正文", "category_ids": ["limits"] },
+      { "id": "L03-02", "slug": "sequence-limit-properties", "title": "极限性质", "source": "完整 Typst 正文", "category_ids": [] }
+    ],
+    "edges": [{ "source": "L03-01", "target": "L03-02" }]
+  }
+}
+```
+
+`category_id` 是已存在且有效的一级知识分类数据库 ID。文件中的分类和知识点 `id` 是各自命名空间内的本批次字符串标识；分类 `parent_id`、知识点 `category_ids` 和边两端只能引用文件中的局部 ID，不能引用外部数据库 ID。文件顶层分类挂到目标分类下，子分类保持文件层级。知识点只关联其直接分类；`category_ids` 为空或省略时关联目标分类，不额外关联祖先。边的 `source` 是前置知识点，`target` 是依赖它的知识点。`schema_version` 是文件格式版本，当前只支持整数 `1`。
+
+导入至少包含一个知识点，分类最多 150 个，知识点最多 1000 个，边最多 6000 条，每个知识点最多关联 100 个分类，整个批次最多 10000 条分类关联。`data` 重新序列化后的 UTF-8 大小不超过 2 MiB，加密后的整个 HTTP 请求仍受 4 MiB 限制。局部 ID 不超过 100 个字符，分类和知识点 `slug` 不超过 100 个字符且遵循现有别名规则，分类名称和知识点标题不超过 200 个字符，正文不超过 200000 个字符。额外字段、空标题或正文、重复 ID 和关系、未知引用以及分类或知识点前置成环均会被拒绝。
+
+整个批次在一个事务中写入，成功返回 201 和如下格式；映射数组的顺序不应作为业务顺序使用：
+
+```json
+{
+  "category_id": 8,
+  "counts": { "categories": 2, "points": 2, "edges": 1 },
+  "categories": [{ "id": "calculus", "category_id": 11 }, { "id": "limits", "category_id": 12 }],
+  "points": [{ "id": "L03-01", "point_id": 21 }, { "id": "L03-02", "point_id": 22 }]
+}
+```
+
+错误响应为普通 JSON，`details` 中的 `field` 指明数组，`index` 是从零开始的条目位置，部分错误还包含 `property`、局部 `id` 或 `slug`。格式及引用错误为 400，已有或批内重复 `slug` 及无效目标分类为 409。分类和知识点的 `slug` 各自在全库唯一，冲突不会复用、移动或覆盖已有内容；失败时整批回滚。接口不读取服务器本机路径，不接受审核、版本、统计或审阅字段。
 
 ## 讲义
 
