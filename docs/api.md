@@ -62,7 +62,7 @@
 
 管理列表的 `category_ids` 为该知识点所有直接关联的分类永久 ID，按 ID 升序排列，包括已归档分类；无关联时为 `[]`。知识点自身无论是 `active` 还是 `archived` 都会返回。`GET /categories/knowledge` 只返回有效分类，因此不在分类接口结果中的 ID 仍可能是已归档的现有关联，前端不能把它当成不存在并在整体替换分类时自动删除。`PUT /knowledge-points/:id/categories` 会整体替换关联，若不打算移除归档分类，应一并保留这些 ID。管理详情接口暂不返回 `category_ids`，管理列表是该字段的数据来源。
 
-知识点公开列表、详情、管理查询及搜索设置 `Cache-Control: no-store`。本分支没有知识地图接口；尚未合并的地图功能需按此模型同步，不提供知识点 `revision_id` 或 `summary`。
+知识点公开列表、详情、管理查询及搜索设置 `Cache-Control: no-store`。知识地图见下方接口，不提供知识点 `revision_id` 或 `summary`。
 
 ### 永久删除
 
@@ -110,6 +110,26 @@
 ```
 
 错误响应为普通 JSON，`details` 中的 `field` 指明数组，`index` 是从零开始的条目位置，部分错误还包含 `property`、局部 `id` 或 `slug`。格式及引用错误为 400，已有或批内重复 `slug` 及无效目标分类为 409。分类和知识点的 `slug` 各自在全库唯一，冲突不会复用、移动或覆盖已有内容；失败时整批回滚。接口不读取服务器本机路径，不接受审核、版本、统计或审阅字段。
+
+### 知识地图
+
+`GET /api/knowledge-map` 允许匿名访问，可选 `category_id` 为正整数。省略时返回所有有效知识点；传入时只返回属于该有效分类及其任意层级后代的知识点。遍历后代时会经过归档分类；目标分类不存在或已归档返回 404，参数格式不合法返回 400。前端可选择 `parent_id` 为 `null` 的一级分类，并在返回节点范围内按标题搜索。
+
+响应示例：
+
+```json
+{
+  "categories": [{ "id": 1, "parent_id": null, "slug": "analysis", "name": "分析", "pos": 0 }],
+  "nodes": [{ "id": 10, "slug": "sequence-limit", "title": "数列极限", "category_ids": [1] }, { "id": 11, "slug": "limit-rule", "title": "极限性质", "category_ids": [1] }],
+  "edges": [{ "source": 10, "target": 11 }],
+  "stats": { "category_count": 1, "node_count": 2, "edge_count": 1 },
+  "filter": { "category_id": 1, "include_descendants": true }
+}
+```
+
+`categories` 始终是全部有效分类，`category_count` 是其数量，并非筛选范围内分类数；若有效分类的父分类已归档，`parent_id` 仍是真实父 ID，父项可能不在返回列表。`nodes` 只包含有效知识点，同一点即使属于多个分类也只出现一次，`category_ids` 是其全部有效的直接分类 ID。没有分类或前置关系的有效知识点在未筛选地图中仍会返回。
+
+`edges.source` 为前置知识点永久 ID，`edges.target` 为依赖者 ID；只返回两端都在本次节点结果内的边，不能据此推断范围外没有前置依赖。`node_count` 和 `edge_count` 是本次结果数量。分类按 `pos,id`，节点按 `id`，边按 `source,target` 升序排列。整个响应在同一只读一致快照中获取，不含正文、版本、简介、动画和个人掌握状态。节点详情通过 `GET /api/knowledge-points/:id` 读取。响应设置 `Cache-Control: no-store`；当前没有分页。
 
 ## 讲义
 

@@ -1,7 +1,12 @@
 import * as service from '../services/knowledge.js'
+import { knowledgeMap } from '../services/knowledge-map.js'
 import { body, id, integer, string, slug, list, choice } from '../lib/validate.js'
 
 export default async function knowledgeRoutes(app) {
+  app.get('/knowledge-map', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return knowledgeMap(req.query.category_id === undefined ? null : id(req.query.category_id))
+  })
   app.get('/knowledge-points', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.listPublic()
