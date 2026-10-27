@@ -148,7 +148,7 @@ export async function setPrerequisites(user, pointId, ids) {
   requireAdmin(user)
   if (new Set(ids).size !== ids.length) throw badRequest('前置知识点不能重复')
   return tx(async (db) => {
-    if (!(await db.query('SELECT 1 FROM knowledge_points WHERE id = $1', [pointId])).rowCount) throw notFound('知识点')
+    if (!(await db.query('SELECT id FROM knowledge_points WHERE id=$1 FOR UPDATE', [pointId])).rowCount) throw notFound('知识点')
     await db.query('DELETE FROM knowledge_prerequisites WHERE knowledge_point_id = $1', [pointId])
     for (const prereq of ids) {
       await db.query('INSERT INTO knowledge_prerequisites(knowledge_point_id,prerequisite_id,created_by) VALUES ($1,$2,$3)', [pointId, prereq, user.id])
