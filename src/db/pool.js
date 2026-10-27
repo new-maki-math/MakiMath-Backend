@@ -11,9 +11,15 @@ const toNumber = (v) => {
 pg.types.setTypeParser(pg.types.builtins.INT8, toNumber)
 
 export const pool = new pg.Pool({ ...config.db, max: 10 })
+let poolLogger = null
+
+export function setPoolLogger(logger) {
+  poolLogger = logger
+}
 
 pool.on('error', (err) => {
-  console.error('[db] 空闲连接出错：', err.message)
+  if (poolLogger) poolLogger.error(err, '数据库空闲连接出错')
+  else console.error('数据库空闲连接出错', err)
 })
 
 // 普通查询使用连接池

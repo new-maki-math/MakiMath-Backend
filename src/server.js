@@ -16,7 +16,7 @@ try {
   app.log.info(`数据库已连接 ${info.database}`)
   await app.listen({ host: config.host, port: config.port })
 } catch (err) {
-  app.log.error(err)
+  app.log.error(err, '服务启动失败')
   await app.close()
   await pool.end()
   process.exit(1)

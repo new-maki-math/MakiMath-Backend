@@ -64,7 +64,6 @@ export function errorHandler(err, req, reply) {
     })
   }
 
-  console.error('[errorHandler]', err)
   req.log.error(err)
   return reply.code(500).send({ error: '服务器内部错误' })
 }

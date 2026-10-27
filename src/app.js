@@ -2,7 +2,7 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import { config } from './config.js'
-import { ping } from './db/pool.js'
+import { ping, setPoolLogger } from './db/pool.js'
 import { errorHandler } from './lib/errors.js'
 import authPlugin from './plugins/auth.js'
 import payloadCryptoPlugin from './plugins/crypto.js'
@@ -13,11 +13,23 @@ import reviewRoutes from './routes/review.js'
 import searchRoutes from './routes/search.js'
 
 export async function buildApp(options = {}) {
+  const logger = { level: process.env.LOG_LEVEL ?? 'info' }
+  if (process.argv.includes('--pretty') && process.env.NODE_ENV !== 'production') {
+    logger.transport = {
+      target: 'pino-pretty',
+      options: {
+        colorize: process.stdout.isTTY,
+        translateTime: 'SYS:HH:MM:ss.l',
+        ignore: 'pid,hostname',
+      },
+    }
+  }
   const app = Fastify({
-    logger: options.logger ?? { level: process.env.LOG_LEVEL ?? 'info' },
+    logger: options.logger ?? logger,
     trustProxy: config.trustProxy,
     bodyLimit: 4 * 1024 * 1024,
   })
+  setPoolLogger(app.log)
   app.setErrorHandler(errorHandler)
   app.setNotFoundHandler((req, reply) => reply.code(404).send({ error: '接口不存在' }))
   await app.register(cors, { origin: true })
