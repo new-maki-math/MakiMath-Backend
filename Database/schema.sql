@@ -1,6 +1,6 @@
 -- 本脚本用于初始化空数据库
 -- 知识点与讲义分别使用独立身份和版本
--- 讲义内容块固定引用已经审核的知识点版本
+-- 讲义源码引用知识点永久标识
 -- 提交审核的内容版本不可继续编辑
 -- 个人讲义与批注及掌握状态由浏览器本地保存
 -- 本脚本不包含旧数据库的迁移与兼容处理
@@ -287,7 +287,7 @@ CREATE TABLE lecture_chapters (
   UNIQUE (lecture_revision_id, pos) DEFERRABLE INITIALLY DEFERRED
 );
 
--- 讲义小节只负责版本内目录结构
+-- 讲义小节保存完整源码
 CREATE TABLE lecture_sections (
   id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 版本内小节标识
   lecture_revision_id bigint      NOT NULL REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 所属讲义版本
@@ -297,6 +297,7 @@ CREATE TABLE lecture_sections (
   tag                 text        NOT NULL DEFAULT '', -- 小节编号文案
   title               text        NOT NULL DEFAULT '', -- 小节标题
   summary             text        NOT NULL DEFAULT '', -- 小节说明
+  source              text        NOT NULL DEFAULT '', -- 小节完整源码
   pos                 integer     NOT NULL CHECK (pos >= 0), -- 小节顺序
   created_at          timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at          timestamptz NOT NULL DEFAULT now(), -- 更新时间
@@ -308,35 +309,25 @@ CREATE TABLE lecture_sections (
     REFERENCES lecture_chapters(lecture_revision_id, id) ON DELETE RESTRICT
 );
 
--- 内容块按顺序存放作者正文或固定知识点版本引用
-CREATE TABLE lecture_blocks (
-  id                    bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 版本内内容块标识
-  lecture_revision_id   bigint      NOT NULL REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 所属讲义版本
-  section_id            bigint      NOT NULL, -- 同一版本内的小节标识
-  occurrence_id         uuid        NOT NULL DEFAULT gen_random_uuid(), -- 每次出现的独立实例标识
-  block_type            text        NOT NULL CHECK (block_type IN ('author', 'knowledge_reference')), -- 内容块类型
-  source                text, -- 作者内容块正文源码
-  knowledge_point_id    bigint, -- 引用的知识点永久标识
-  knowledge_revision_id bigint, -- 引用的确定知识点版本
-  animation             jsonb       CHECK (jsonb_typeof(animation) = 'object' AND NOT (animation ? 'scenes_code')), -- 作者内容块动画配置
-  pos                   integer     NOT NULL CHECK (pos >= 0), -- 小节内内容块顺序
-  created_at            timestamptz NOT NULL DEFAULT now(), -- 创建时间
-  updated_at            timestamptz NOT NULL DEFAULT now(), -- 更新时间
+-- 小节知识点引用由源码解析生成
+CREATE TABLE lecture_knowledge_references (
+  id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 引用记录标识
+  lecture_revision_id bigint      NOT NULL REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 所属讲义版本
+  section_id          bigint      NOT NULL, -- 所属小节
+  occurrence_id       uuid        NOT NULL, -- 引用实例标识
+  knowledge_point_id  bigint      NOT NULL REFERENCES knowledge_points(id) ON DELETE RESTRICT, -- 知识点永久标识
+  source_offset       integer     NOT NULL CHECK (source_offset >= 0), -- 源码中的起始位置
+  source_length       integer     NOT NULL CHECK (source_length > 0), -- 引用源码长度
+  created_at          timestamptz NOT NULL DEFAULT now(), -- 创建时间
+  updated_at          timestamptz NOT NULL DEFAULT now(), -- 更新时间
   UNIQUE (lecture_revision_id, occurrence_id),
-  UNIQUE (section_id, pos) DEFERRABLE INITIALLY DEFERRED,
-  CONSTRAINT lecture_blocks_section_fk FOREIGN KEY (lecture_revision_id, section_id)
-    REFERENCES lecture_sections(lecture_revision_id, id) ON DELETE RESTRICT,
-  CONSTRAINT lecture_blocks_knowledge_fk FOREIGN KEY (knowledge_point_id, knowledge_revision_id)
-    REFERENCES knowledge_revisions(knowledge_point_id, id) ON DELETE RESTRICT,
-  CONSTRAINT lecture_blocks_payload_check CHECK (
-    (block_type = 'author' AND source IS NOT NULL AND knowledge_point_id IS NULL AND knowledge_revision_id IS NULL)
-    OR (block_type = 'knowledge_reference' AND source IS NULL AND animation IS NULL
-      AND knowledge_point_id IS NOT NULL AND knowledge_revision_id IS NOT NULL)
-  )
+  UNIQUE (section_id, source_offset),
+  CONSTRAINT lecture_knowledge_references_section_fk FOREIGN KEY (lecture_revision_id, section_id)
+    REFERENCES lecture_sections(lecture_revision_id, id) ON DELETE RESTRICT
 );
 
-CREATE INDEX lecture_blocks_revision_idx ON lecture_blocks (lecture_revision_id);
-CREATE INDEX lecture_blocks_knowledge_idx ON lecture_blocks (knowledge_point_id, knowledge_revision_id);
+CREATE INDEX lecture_knowledge_references_revision_idx ON lecture_knowledge_references (lecture_revision_id);
+CREATE INDEX lecture_knowledge_references_point_idx ON lecture_knowledge_references (knowledge_point_id);
 
 -- 讲义审核记录绑定完整讲义版本
 CREATE TABLE lecture_reviews (
@@ -472,7 +463,7 @@ BEGIN
           RAISE EXCEPTION '提交审核前必须填写知识点正文';
         END IF;
       ELSE
-        IF NOT EXISTS (SELECT 1 FROM lecture_blocks WHERE lecture_revision_id = NEW.id) THEN
+        IF NOT EXISTS (SELECT 1 FROM lecture_sections WHERE lecture_revision_id = NEW.id AND btrim(source) <> '') THEN
           RAISE EXCEPTION '提交审核前必须编排讲义内容';
         END IF;
       END IF;
@@ -509,13 +500,12 @@ BEGIN
 END;
 $$;
 
--- 编辑目录或内容块时锁定所属讲义版本
+-- 编辑目录源码或引用时锁定所属讲义版本
 CREATE FUNCTION guard_lecture_content() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   revision_id bigint;
   revision_status text;
-  reference_status text;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     revision_id := OLD.lecture_revision_id;
@@ -536,15 +526,6 @@ BEGIN
   END IF;
   IF TG_OP = 'DELETE' THEN
     RETURN OLD;
-  END IF;
-  IF TG_TABLE_NAME = 'lecture_blocks' THEN
-    IF NEW.block_type = 'knowledge_reference' THEN
-      SELECT status INTO reference_status FROM knowledge_revisions
-       WHERE id = NEW.knowledge_revision_id AND knowledge_point_id = NEW.knowledge_point_id FOR SHARE;
-      IF reference_status IS DISTINCT FROM 'approved' THEN
-        RAISE EXCEPTION '讲义只能引用已审核通过的知识点版本';
-      END IF;
-    END IF;
   END IF;
   NEW.updated_at := clock_timestamp();
   RETURN NEW;
@@ -654,7 +635,7 @@ CREATE TRIGGER lecture_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON lectu
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
 CREATE TRIGGER lecture_sections_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_sections
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
-CREATE TRIGGER lecture_blocks_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_blocks
+CREATE TRIGGER lecture_knowledge_references_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_knowledge_references
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
 
 CREATE TRIGGER knowledge_points_public_guard BEFORE INSERT OR UPDATE ON knowledge_points
@@ -672,7 +653,7 @@ CREATE TRIGGER lecture_reviews_apply AFTER INSERT ON lecture_reviews
 
 -- 审核通过后由服务端在事务中更新公开入口
 -- 推荐标记由服务端按发布策略单独设置
--- 知识点新版审核不会自动替换讲义的固定引用
+-- 讲义读取知识点当前公开版本
 -- 已提交版本和审核记录需要保留以支持追溯
 -- 内容关联的账号应优先停用以保留归属和贡献记录
 -- 管理员账号由部署流程创建并设置独立密码

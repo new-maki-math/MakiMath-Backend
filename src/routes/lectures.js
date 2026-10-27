@@ -1,6 +1,6 @@
 import * as service from '../services/lectures.js'
 import { badRequest } from '../lib/errors.js'
-import { body, id, integer, string, slug, object, list, choice, animation } from '../lib/validate.js'
+import { body, id, integer, string, slug, object, list, choice } from '../lib/validate.js'
 
 function occurrence(value) {
   if (value !== undefined && (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))) {
@@ -16,26 +16,12 @@ function validateTree(chapters) {
     string(chapter.slug, 100)
     for (const field of ['tag','title','summary']) if (chapter[field] !== undefined) string(chapter[field], 5000, true)
     for (const section of list(chapter.sections, 200)) {
-      body(section, ['occurrence_id','slug','tag','title','summary','blocks'], ['slug','blocks'])
+      body(section, ['occurrence_id','slug','tag','title','summary','source'], ['slug','source'])
       occurrence(section.occurrence_id)
       string(section.slug, 100)
+      string(section.source, 200000, true)
       for (const field of ['tag','title','summary']) if (section[field] !== undefined) string(section[field], 5000, true)
-      for (const block of list(section.blocks, 500)) {
-        count++
-        if (count > 2000) throw badRequest('讲义内容块数量超出限制')
-        body(block, ['occurrence_id','block_type','source','knowledge_point_id','knowledge_revision_id','animation'], ['block_type'])
-        occurrence(block.occurrence_id)
-        choice(block.block_type, ['author','knowledge_reference'])
-        if (block.block_type === 'author') {
-          string(block.source, 200000, true)
-          if (block.knowledge_point_id != null || block.knowledge_revision_id != null) throw badRequest('作者内容不能包含知识点引用')
-          if (block.animation != null) animation(block.animation)
-        } else {
-          id(block.knowledge_point_id)
-          id(block.knowledge_revision_id)
-          if (block.source != null || block.animation != null) throw badRequest('知识点引用不能包含正文和动画副本')
-        }
-      }
+      if (++count > 2000) throw badRequest('讲义小节数量超出限制')
     }
   }
 }
@@ -43,7 +29,10 @@ function validateTree(chapters) {
 export default async function lectureRoutes(app) {
   app.get('/lectures', async () => service.publicList())
   app.get('/lectures/mine', { preHandler: [app.requireLogin] }, async req => service.mine(req.user))
-  app.get('/lectures/:id', async req => service.publicLecture(id(req.params.id)))
+  app.get('/lectures/:id', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.publicLecture(id(req.params.id))
+  })
   app.post('/lectures', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['slug','title'], ['slug','title'])
     slug(d.slug)
@@ -60,8 +49,10 @@ export default async function lectureRoutes(app) {
     reply.code(201)
     return result
   })
-  app.get('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async req =>
-    service.revision(req.user, id(req.params.id)))
+  app.get('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.revision(req.user, id(req.params.id))
+  })
   app.put('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
     const fields = ['edit_version','title','subtitle','descr','category_id','typst_version','metadata','change_note','chapters']
     const d = body(req.body, fields, fields)

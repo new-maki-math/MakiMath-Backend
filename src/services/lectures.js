@@ -2,24 +2,28 @@ import { randomUUID } from 'node:crypto'
 import { query, tx } from '../db/pool.js'
 import { conflict, forbidden, notFound } from '../lib/errors.js'
 import { requireUser, lectureAccess } from './access.js'
+import { extractKnowledgeReferences } from '../lib/knowledge-references.js'
 
 async function snapshot(db, revisionId) {
   const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
   if (!revision) throw notFound('讲义版本')
   const chapters = (await db.query('SELECT * FROM lecture_chapters WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
   const sections = (await db.query('SELECT * FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
-  const blocks = (await db.query(
-    `SELECT b.*, k.title AS knowledge_title, k.summary AS knowledge_summary,
-            k.source AS knowledge_source, k.animation AS knowledge_animation, k.metadata AS knowledge_metadata
-       FROM lecture_blocks b LEFT JOIN knowledge_revisions k ON k.id=b.knowledge_revision_id
-      WHERE b.lecture_revision_id=$1 ORDER BY b.pos,b.id`, [revisionId],
-  )).rows
+  const references = (await db.query(
+    `SELECT x.*,p.slug AS knowledge_slug,r.id AS revision_id,r.title AS knowledge_title,
+            r.summary AS knowledge_summary,r.source AS knowledge_source,r.animation AS knowledge_animation,
+            r.metadata AS knowledge_metadata
+       FROM lecture_knowledge_references x
+       LEFT JOIN knowledge_points p ON p.id=x.knowledge_point_id AND p.status='active'
+       LEFT JOIN knowledge_revisions r ON r.id=p.public_revision_id AND r.status='approved'
+      WHERE x.lecture_revision_id=$1 ORDER BY x.section_id,x.source_offset`, [revisionId],
+  )).rows.map(row => ({ ...row, availability: row.revision_id ? 'available' : 'unavailable' }))
   return {
     revision,
     chapters: chapters.map(chapter => ({
       ...chapter,
       sections: sections.filter(s => s.chapter_id === chapter.id).map(section => ({
-        ...section, blocks: blocks.filter(b => b.section_id === section.id),
+        ...section, references: references.filter(ref => ref.section_id === section.id),
       })),
     })),
   }
@@ -54,17 +58,22 @@ export async function publicList() {
 }
 
 export async function publicLecture(lectureId) {
-  const row = (await query(
-    `SELECT id,slug,public_revision_id,is_recommended FROM lectures
-      WHERE id=$1 AND publication_status='published'`, [lectureId],
-  )).rows[0]
-  if (!row) throw notFound('讲义')
-  return { lecture: row, ...(await snapshot({ query }, row.public_revision_id)) }
+  return tx(async db => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const row = (await db.query(
+      `SELECT l.id,l.slug,l.public_revision_id,l.is_recommended FROM lectures l
+       JOIN lecture_revisions r ON r.id=l.public_revision_id AND r.status='approved'
+       WHERE l.id=$1 AND l.publication_status='published'`, [lectureId],
+    )).rows[0]
+    if (!row) throw notFound('讲义')
+    return { lecture: row, ...(await snapshot(db, row.public_revision_id)) }
+  })
 }
 
 export async function revision(user, revisionId) {
   requireUser(user)
   return tx(async (db) => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
     const row = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
     if (!row) throw notFound('讲义版本')
     await lectureAccess(db, row.lecture_id, user)
@@ -87,17 +96,24 @@ async function insertTree(db, revisionId, chapters) {
       [revisionId, chapter.occurrence_id ?? randomUUID(), chapter.slug, chapter.tag ?? '', chapter.title ?? '', chapter.summary ?? '', i],
     )).rows[0]
     for (const [j, section] of chapter.sections.entries()) {
+      const parsed = extractKnowledgeReferences(section.source)
+      if (parsed.references.length) {
+        const ids = [...new Set(parsed.references.map(ref => ref.knowledge_point_id))]
+        const points = (await db.query('SELECT id FROM knowledge_points WHERE id=ANY($1::bigint[])', [ids])).rows
+        const existing = new Set(points.map(point => point.id))
+        const missing = parsed.references.find(ref => !existing.has(ref.knowledge_point_id))
+        if (missing) throw conflict('引用的知识点不存在', { section: section.slug, knowledge_point_id: missing.knowledge_point_id, source_offset: missing.source_offset })
+      }
       const sec = (await db.query(
-        `INSERT INTO lecture_sections(lecture_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,pos)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
-        [revisionId, ch.id, section.occurrence_id ?? randomUUID(), section.slug, section.tag ?? '', section.title ?? '', section.summary ?? '', j],
+        `INSERT INTO lecture_sections(lecture_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,source,pos)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+        [revisionId, ch.id, section.occurrence_id ?? randomUUID(), section.slug, section.tag ?? '', section.title ?? '', section.summary ?? '', parsed.source, j],
       )).rows[0]
-      for (const [k, block] of section.blocks.entries()) {
+      for (const ref of parsed.references) {
         await db.query(
-          `INSERT INTO lecture_blocks(lecture_revision_id,section_id,occurrence_id,block_type,source,knowledge_point_id,knowledge_revision_id,animation,pos)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [revisionId, sec.id, block.occurrence_id ?? randomUUID(), block.block_type, block.source ?? null,
-            block.knowledge_point_id ?? null, block.knowledge_revision_id ?? null, block.animation ?? null, k],
+          `INSERT INTO lecture_knowledge_references(lecture_revision_id,section_id,occurrence_id,knowledge_point_id,source_offset,source_length)
+           VALUES ($1,$2,$3,$4,$5,$6)`,
+          [revisionId,sec.id,ref.occurrence_id,ref.knowledge_point_id,ref.source_offset,ref.source_length],
         )
       }
     }
@@ -132,7 +148,7 @@ export async function save(user, revisionId, data) {
     const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (revision.status !== 'draft') throw conflict('只有草稿可以编辑')
     if (revision.edit_version !== data.edit_version) throw conflict('草稿已被修改请重新加载')
-    await db.query('DELETE FROM lecture_blocks WHERE lecture_revision_id=$1', [revisionId])
+    await db.query('DELETE FROM lecture_knowledge_references WHERE lecture_revision_id=$1', [revisionId])
     await db.query('DELETE FROM lecture_sections WHERE lecture_revision_id=$1', [revisionId])
     await db.query('DELETE FROM lecture_chapters WHERE lecture_revision_id=$1', [revisionId])
     await db.query(
@@ -141,8 +157,23 @@ export async function save(user, revisionId, data) {
       [data.title,data.subtitle,data.descr,data.category_id,data.typst_version,data.metadata,data.change_note,revisionId],
     )
     await insertTree(db, revisionId, data.chapters)
-    return snapshot(db, revisionId)
+    const result = await snapshot(db, revisionId)
+    result.warnings = result.chapters.flatMap(ch => ch.sections.flatMap(sec => sec.references.filter(ref => ref.availability === 'unavailable').map(ref => ({ section_id: sec.id, occurrence_id: ref.occurrence_id, knowledge_point_id: ref.knowledge_point_id, source_offset: ref.source_offset }))))
+    return result
   })
+}
+
+// 检查引用并锁定知识点直到事务结束
+export async function ensureReferencesAvailable(db, revisionId) {
+  const refs = (await db.query('SELECT DISTINCT knowledge_point_id FROM lecture_knowledge_references WHERE lecture_revision_id=$1 ORDER BY knowledge_point_id', [revisionId])).rows
+  if (!refs.length) return
+  const ids = refs.map(ref => ref.knowledge_point_id)
+  const points = (await db.query('SELECT id,status,public_revision_id FROM knowledge_points WHERE id=ANY($1::bigint[]) ORDER BY id FOR SHARE', [ids])).rows
+  const revisions = (await db.query("SELECT id FROM knowledge_revisions WHERE id=ANY($1::bigint[]) AND status='approved'", [points.map(point => point.public_revision_id).filter(Boolean)])).rows
+  const approved = new Set(revisions.map(row => row.id))
+  if (points.length !== ids.length || points.some(point => point.status !== 'active' || !approved.has(point.public_revision_id))) {
+    throw conflict('讲义包含不可用的知识点引用')
+  }
 }
 
 export async function submit(user, revisionId, version) {
@@ -154,6 +185,7 @@ export async function submit(user, revisionId, version) {
     const row = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (row.status !== 'draft') throw conflict('该版本已提交')
     if (row.edit_version !== version) throw conflict('草稿已被修改请重新加载')
+    await ensureReferencesAvailable(db, revisionId)
     return (await db.query("UPDATE lecture_revisions SET status='pending',edit_version=edit_version+1 WHERE id=$1 RETURNING *", [revisionId])).rows[0]
   })
 }

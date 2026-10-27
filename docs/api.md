@@ -75,7 +75,7 @@
 | GET | `/lectures/mine` | 登录用户有权访问的讲义列表 |
 | POST | `/lectures` | 提交 `slug`、`title`，返回 `lecture` 和首个草稿 `revision` |
 | GET | `/lectures/:id/revisions` | 读取有权访问的讲义版本列表 |
-| POST | `/lectures/:id/revisions` | 提交 `based_on_id`，复制完整版本和内容块生成草稿 |
+| POST | `/lectures/:id/revisions` | 提交 `based_on_id`，复制完整版本和小节源码生成草稿 |
 | GET | `/lecture-revisions/:id` | 读取有权访问的完整版本 |
 | PUT | `/lecture-revisions/:id` | 以完整目录树替换草稿 |
 | POST | `/lecture-revisions/:id/submit` | 提交 `edit_version` 进入审核 |
@@ -104,10 +104,7 @@
         {
           "slug": "section-1",
           "title": "第一节",
-          "blocks": [
-            { "block_type": "author", "source": "讲师引入" },
-            { "block_type": "knowledge_reference", "knowledge_point_id": 1, "knowledge_revision_id": 1 }
-          ]
+          "source": "讲师引入 #mm-knowledge(1)"
         }
       ]
     }
@@ -115,9 +112,33 @@
 }
 ```
 
-保存时按数组顺序生成章节、小节和内容块顺序。每一级可提供 `occurrence_id`，省略时服务端生成。读取后再次保存应保留原有实例标识，以便批注定位；复制已提交版本会保留实例标识。表内行标识可能因完整保存而变化，前端不能用它作为跨保存稳定标识。
+保存体中的每个小节只包含完整的 `source`，不再提交 `blocks` 或知识点版本。引用写作 `#mm-knowledge(1)`，参数只能是知识点正整数永久 ID。服务端解析原始源码并生成引用关系，注释、字符串和原样代码中的文字不会被当作引用。知识点正文暂不支持嵌套引用。
 
-作者内容块必须有 `source`，可选对象类型的 `animation`。知识点引用块必须提供匹配的知识点标识和已审核版本标识，不允许携带正文或动画副本。完整版本返回引用版本的 `knowledge_title`、`knowledge_source` 等字段供阅读，这些字段不是保存请求字段。
+服务端为新引用补充源码标识，例如 `/*mm-ref:68de080f-4265-411b-8986-deb93f09d1c1*/#mm-knowledge(1)`。保存响应返回规范化后的 `source`，前端必须使用返回值覆盖编辑内容。移动引用时标识和宏一起移动；复制时副本应删除标识以生成新的实例，重复标识会报错。删除标识后该次引用被视为新实例。章节和小节的 `occurrence_id` 同样应在保存时保留。
+
+保存不存在的知识点会失败；停用或尚未公开的知识点允许保存在草稿中，响应顶层 `warnings` 列出小节、实例、知识点和位置。提交及管理员批准前重新检查引用，存在不可用项会返回 409。提交后目录、源码和引用关系不可修改。
+
+阅读响应的小节含 `source` 和 `references`，每条引用有 `occurrence_id`、`knowledge_point_id`、`source_offset`、`source_length`、`availability`；位置使用 JavaScript UTF-16 代码单元并相对于规范化源码。可用时附有当前公开版本的 `revision_id`、`knowledge_title`、`knowledge_summary`、`knowledge_source`、`knowledge_animation` 和 `knowledge_metadata`，不可用时 `availability` 为 `unavailable` 且内容字段为空。前端必须显式展示不可用占位，不得跳过或回退旧版本。多次引用相同知识点有不同实例标识。
+
+公开讲义在同一数据库快照内批量读取当前公开知识版本，知识点发布新版后后续读取会使用新版。讲义详情响应为 `Cache-Control: no-store`；前端重新进入、恢复可见和手动刷新时重新请求，已打开页面不保证实时推送更新。讲义版本冻结不包含知识点正文。
+
+阅读响应示例：
+
+```json
+{
+  "source": "/*mm-ref:68de080f-4265-411b-8986-deb93f09d1c1*/#mm-knowledge(1)",
+  "references": [{
+    "occurrence_id": "68de080f-4265-411b-8986-deb93f09d1c1",
+    "knowledge_point_id": 1,
+    "source_offset": 0,
+    "source_length": 63,
+    "availability": "available",
+    "revision_id": 2,
+    "knowledge_title": "知识点标题",
+    "knowledge_source": "知识点正文"
+  }]
+}
+```
 
 查看协作者只读，编辑协作者可以修改和提交；所有者或管理员可管理协作者及上下架。讲义必须先有审核通过的公开版本才能上架。下架或归档会取消推荐标记。
 
@@ -147,7 +168,6 @@
 
 - 讲义所有者可下架和重新上架已审核版本，管理员可管理推荐；是否需要额外审核下架或重新上架。
 - 管理员可以审核自己提交的版本；是否需要禁止自审。
-- 知识点停用后，它的公开详情不可直接读取，但已发布讲义仍读取固定引用的版本；是否需要调整展示策略。
 - 审核通过自动发布，推荐默认关闭；是否采用自动推荐。
 
 ## 验证方式

@@ -56,6 +56,7 @@ test('讲义提交拒绝旧版本和重复提交', async () => {
       if (sql.startsWith('SELECT * FROM lectures')) return { rows: [{ id: 1, owner_id: 10 }] }
       if (sql.startsWith('SELECT permission')) return { rows: [] }
       if (sql.startsWith('SELECT * FROM lecture_revisions')) return { rows: [{ id: 1, status, edit_version: version }] }
+      if (sql.startsWith('SELECT DISTINCT knowledge_point_id FROM lecture_knowledge_references')) return { rows: [] }
       if (sql.startsWith('UPDATE lecture_revisions')) {
         status = 'pending'
         version++

@@ -11,11 +11,13 @@ export async function search(term, limit) {
        FROM lectures l JOIN lecture_revisions r ON r.id=l.public_revision_id
       WHERE l.publication_status='published' AND r.status='approved'
         AND (strpos(lower(r.title),lower($1))>0 OR strpos(lower(r.descr),lower($1))>0 OR EXISTS (
-          SELECT 1 FROM lecture_blocks b
-          LEFT JOIN knowledge_revisions k ON k.id=b.knowledge_revision_id
-          WHERE b.lecture_revision_id=r.id
-            AND (strpos(lower(COALESCE(b.source,'')),lower($1))>0
-              OR strpos(lower(COALESCE(k.source,'')),lower($1))>0)
+          SELECT 1 FROM lecture_sections sec
+          WHERE sec.lecture_revision_id=r.id AND (strpos(lower(sec.source),lower($1))>0 OR EXISTS (
+            SELECT 1 FROM lecture_knowledge_references x
+            JOIN knowledge_points p ON p.id=x.knowledge_point_id AND p.status='active'
+            JOIN knowledge_revisions k ON k.id=p.public_revision_id AND k.status='approved'
+            WHERE x.section_id=sec.id AND strpos(lower(k.source),lower($1))>0
+          ))
         ))
       ORDER BY type,id LIMIT $2`, [term, limit],
   )
