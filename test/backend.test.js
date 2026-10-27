@@ -5,7 +5,7 @@ import { pool } from '../src/db/pool.js'
 import { encryptPayload } from '../src/lib/crypto.js'
 import { lectureAccess } from '../src/services/access.js'
 import { submit as submitLecture } from '../src/services/lectures.js'
-import { setPrerequisites, create as createKnowledge } from '../src/services/knowledge.js'
+import { setPrerequisites, create as createKnowledge, manage as manageKnowledge } from '../src/services/knowledge.js'
 import { normalizeIp } from '../src/lib/util.js'
 import { animation } from '../src/lib/validate.js'
 
@@ -28,6 +28,21 @@ test('讲义权限区分所有者与查看和编辑协作者', async () => {
 test('知识点维护只允许管理员操作', async () => {
   await assert.rejects(() => createKnowledge({ id: 10, role: 'editor' }, {}), { status: 403 })
   await assert.rejects(() => createKnowledge(null, {}), { status: 401 })
+})
+
+test('知识点管理列表返回全部分类并转换整数', async () => {
+  const originalQuery = pool.query
+  pool.query = async () => ({ rows: [
+    { id: 1, status: 'disabled', category_ids: ['2', '3'] },
+    { id: 2, status: 'archived', category_ids: [] },
+  ] })
+  try {
+    const rows = await manageKnowledge({ id: 1, role: 'super_admin' })
+    assert.deepEqual(rows.map(row => row.category_ids), [[2, 3], []])
+    await assert.rejects(() => manageKnowledge({ id: 2, role: 'editor' }), { status: 403 })
+  } finally {
+    pool.query = originalQuery
+  }
 })
 
 test('客户端地址转换', () => {

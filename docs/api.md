@@ -40,7 +40,7 @@
 | --- | --- | --- |
 | GET | `/knowledge-points` | 公开有效知识点列表，返回 `id`、`slug`、`title` |
 | GET | `/knowledge-points/:id` | 公开有效知识点详情，返回 `id`、`slug`、`title`、`source` 和 `categories` |
-| GET | `/knowledge-points/manage` | 管理员读取所有状态的知识点列表 |
+| GET | `/knowledge-points/manage` | 管理员读取所有状态的知识点列表，包括全部关联分类的 `category_ids` |
 | GET | `/knowledge-points/manage/:id` | 管理员读取任意状态的知识点详情及维护记录 |
 | POST | `/knowledge-points` | 管理员提交 `slug`、`title`、`source`，返回新知识点 |
 | PUT | `/knowledge-points/:id` | 管理员提交 `title`、`source`，立即更新 |
@@ -56,6 +56,8 @@
 ```
 
 内容编辑请求只需要 `title` 与 `source`。标题和正文不能为空，维护人从登录身份取得。内容更新采用最后一次成功写入的结果，当前没有并发冲突提示。停用或归档后公开详情返回 404，管理员仍可通过管理接口查看并恢复。分类和前置关系由管理员维护，前置关系替换在事务中锁定所属知识点，数据库拒绝循环依赖。
+
+管理列表的 `category_ids` 为该知识点所有直接关联的分类永久 ID，按 ID 升序排列，包括已归档分类；无关联时为 `[]`。知识点自身无论是 `active`、`disabled` 还是 `archived` 都会返回。`GET /categories/knowledge` 只返回有效分类，因此不在分类接口结果中的 ID 仍可能是已归档的现有关联，前端不能把它当成不存在并在整体替换分类时自动删除。`PUT /knowledge-points/:id/categories` 会整体替换关联，若不打算移除归档分类，应一并保留这些 ID。管理详情接口暂不返回 `category_ids`，管理列表是该字段的数据来源。
 
 知识点公开列表、详情、管理查询及搜索设置 `Cache-Control: no-store`。本分支没有知识地图接口；尚未合并的地图功能需按此模型同步，不提供知识点 `revision_id` 或 `summary`。
 

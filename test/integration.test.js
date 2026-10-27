@@ -52,6 +52,19 @@ test('知识点审核与讲义发布完整流程', { skip: !enabled }, async () 
     assert.equal((await call('PUT', '/knowledge-points/' + pointId, { title: '定义', source: '越权修改' }, editor)).status, 403)
     assert.equal((await call('GET', '/knowledge-points/manage', undefined, editor)).status, 403)
     assert.equal((await call('GET', '/knowledge-points/manage', undefined, admin)).status, 200)
+    const categoryA = await call('POST', '/categories/knowledge', { slug: 'active-' + suffix, name: '有效分类' }, admin)
+    const categoryB = await call('POST', '/categories/knowledge', { slug: 'archive-' + suffix, name: '归档分类' }, admin)
+    assert.equal(categoryA.status, 201)
+    assert.equal(categoryB.status, 201)
+    assert.equal((await call('PUT', `/knowledge-points/${pointId}/categories`, { categories: [categoryA.data.id, categoryB.data.id] }, admin)).status, 200)
+    assert.equal((await call('PUT', `/categories/knowledge/${categoryB.data.id}`, {
+      parent_id: null, name: '归档分类', descr: '', pos: 0, status: 'archived',
+    }, admin)).status, 200)
+    const managed = await call('GET', '/knowledge-points/manage', undefined, admin)
+    assert.deepEqual(managed.data.find(point => point.id === pointId).category_ids, [categoryA.data.id, categoryB.data.id].sort((a,b) => a-b))
+    const visibleCategories = await call('GET', '/categories/knowledge')
+    assert.equal(visibleCategories.data.some(category => category.id === categoryB.data.id), false)
+
     assert.equal((await call('GET', '/knowledge-revisions/mine', undefined, admin)).status, 404)
     assert.equal((await call('POST', '/reviews/knowledge/1', { decision: 'approved', comment: '' }, admin)).status, 400)
     assert.equal((await call('PATCH', `/knowledge-points/${pointId}/status`, { status: 'disabled' }, editor)).status, 403)
@@ -82,6 +95,8 @@ test('知识点审核与讲义发布完整流程', { skip: !enabled }, async () 
     assert.equal('warnings' in saved.data, false)
     assert.equal('references' in saved.data.chapters[0].sections[0], false)
     assert.equal((await call('PATCH', `/knowledge-points/${pointId}/status`, { status: 'disabled' }, admin)).status, 200)
+    const disabledPoints = await call('GET', '/knowledge-points/manage', undefined, admin)
+    assert.deepEqual(disabledPoints.data.find(point => point.id === pointId).category_ids, [categoryA.data.id, categoryB.data.id].sort((a,b) => a-b))
     assert.equal((await call('GET', '/lectures/' + lectureId)).status, 404)
     const submissions = await Promise.all([
       call('POST', `/lecture-revisions/${revisionId}/submit`, { edit_version: saved.data.revision.edit_version }, editor),

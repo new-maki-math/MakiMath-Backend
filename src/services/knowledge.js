@@ -21,7 +21,18 @@ export async function getPublic(pointId) {
 
 export async function manage(user) {
   requireAdmin(user)
-  return (await query('SELECT id,slug,title,status,created_by,updated_by,created_at,updated_at FROM knowledge_points ORDER BY id')).rows
+  const rows = (await query(
+    `SELECT p.id,p.slug,p.title,p.status,p.created_by,p.updated_by,p.created_at,p.updated_at,
+            COALESCE(array_agg(pc.category_id ORDER BY pc.category_id)
+              FILTER (WHERE pc.category_id IS NOT NULL), '{}'::bigint[]) AS category_ids
+       FROM knowledge_points p LEFT JOIN knowledge_point_categories pc ON pc.knowledge_point_id=p.id
+      GROUP BY p.id ORDER BY p.id`,
+  )).rows
+  return rows.map(row => ({ ...row, category_ids: row.category_ids.map(value => {
+    const categoryId = Number(value)
+    if (!Number.isSafeInteger(categoryId)) throw new Error('数据库整数超出安全范围')
+    return categoryId
+  }) }))
 }
 
 export async function getManaged(user, pointId) {
