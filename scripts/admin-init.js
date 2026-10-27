@@ -84,10 +84,10 @@ export function createPrompt(input, output) {
   return {
     signal: controller.signal,
     async ask(label, hidden = false) {
-      output.write(label)
+      if (hidden) output.write(label)
       muted = hidden
       try {
-        return await rl.question('', { signal: controller.signal })
+        return await rl.question(hidden ? '' : label, { signal: controller.signal })
       } finally {
         muted = false
         if (hidden) output.write('\n')
@@ -96,6 +96,15 @@ export function createPrompt(input, output) {
     close() {
       rl.close()
     },
+  }
+}
+
+export async function confirmDatabase(prompt, output) {
+  while (true) {
+    const answer = (await prompt.ask('确认连接正确请输入 yes 或 no：')).trim().toLowerCase()
+    if (answer === 'yes') return true
+    if (answer === 'no') return false
+    output.write('请输入 yes 确认或 no 取消\n')
   }
 }
 
@@ -109,8 +118,10 @@ async function main() {
       'SELECT current_database() AS name, current_user AS db_user, host(inet_server_addr()) AS address, inet_server_port() AS port',
     )).rows[0]
     process.stdout.write(`目标数据库：${target.name}\n数据库用户：${target.db_user}\n数据库地址：${target.address ?? dbConfig.host}\n数据库端口：${target.port ?? dbConfig.port}\n`)
-    const confirmation = await prompt.ask('确认连接正确请输入 yes：')
-    if (confirmation.trim().toLowerCase() !== 'yes') throw new AdminInitError('已取消管理员初始化')
+    if (!(await confirmDatabase(prompt, process.stdout))) {
+      process.stdout.write('已取消管理员初始化\n')
+      return
+    }
     const username = await prompt.ask('管理员用户名：')
     const displayName = await prompt.ask('管理员昵称：')
     validateIdentity(username, displayName)

@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto'
 import { PassThrough } from 'node:stream'
 import { spawnSync } from 'node:child_process'
 import bcrypt from 'bcryptjs'
-import { createPrompt, ensureEligible, initializeAdmin, validateAdminInput } from '../scripts/admin-init.js'
+import { confirmDatabase, createPrompt, ensureEligible, initializeAdmin, validateAdminInput } from '../scripts/admin-init.js'
 
 function makeDatabase(state) {
   const calls = []
@@ -99,6 +99,39 @@ test('交互密码输入不回显并在结束后恢复终端模式', async () =>
     output.destroy()
   }
   assert.equal(input.isRaw, false)
+})
+
+test('确认提示在终端重绘后仍然显示', async () => {
+  const input = new PassThrough()
+  input.isTTY = true
+  input.isRaw = false
+  input.setRawMode = value => { input.isRaw = value; return input }
+  const output = new PassThrough()
+  output.isTTY = true
+  output.columns = 100
+  let captured = ''
+  output.on('data', chunk => { captured += chunk.toString('utf8') })
+  const prompt = createPrompt(input, output)
+  try {
+    const response = prompt.ask('确认请输入 yes：')
+    input.write('abc\x15yes\r')
+    assert.equal(await response, 'yes')
+    assert.equal(captured.split('确认请输入 yes：').length - 1, 2)
+  } finally {
+    prompt.close()
+    input.destroy()
+    output.destroy()
+  }
+})
+
+test('空输入或无效输入会重新提示只有明确输入才确认或取消', async () => {
+  const answers = ['', '其他', ' YES ']
+  let text = ''
+  const prompt = { ask: async () => answers.shift() }
+  const output = { write: value => { text += value } }
+  assert.equal(await confirmDatabase(prompt, output), true)
+  assert.equal(text.split('请输入 yes 确认或 no 取消').length - 1, 2)
+  assert.equal(await confirmDatabase({ ask: async () => 'no' }, output), false)
 })
 
 test('密码输入时可以中断', async () => {
