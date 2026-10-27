@@ -93,7 +93,7 @@ test('讲义提交拒绝旧版本和重复提交', async () => {
   }
 })
 
-test('替换前置关系时先锁定知识点并使用同一事务', async () => {
+test('替换前置关系时先锁定依赖图与知识点并使用同一事务', async () => {
   const originalConnect = pool.connect
   const calls = []
   let released = false
@@ -109,10 +109,11 @@ test('替换前置关系时先锁定知识点并使用同一事务', async () =>
   try {
     const result = await setPrerequisites({ id: 7, role: 'super_admin' }, 12, [21, 22])
     assert.deepEqual(result, { knowledge_point_id: 12, prerequisites: [21, 22] })
-    assert.match(calls[1].sql, /^SELECT id FROM knowledge_points WHERE id\s*=\s*\$1 FOR UPDATE$/)
-    assert.deepEqual(calls[1].params, [12])
+    assert.match(calls[1].sql, /^UPDATE content_graph_locks/)
+    assert.match(calls[2].sql, /^SELECT id FROM knowledge_points WHERE id\s*=\s*\$1 FOR UPDATE$/)
+    assert.deepEqual(calls[2].params, [12])
     assert.equal(calls[0].sql, 'BEGIN')
-    assert.match(calls[2].sql, /^DELETE FROM knowledge_prerequisites/)
+    assert.match(calls[3].sql, /^DELETE FROM knowledge_prerequisites/)
     assert.equal(calls.filter(call => call.sql.startsWith('INSERT INTO knowledge_prerequisites')).length, 2)
     assert.equal(calls.at(-1).sql, 'COMMIT')
     assert.equal(released, true)

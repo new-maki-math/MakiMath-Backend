@@ -158,44 +158,57 @@ export async function setPointStatus(user, pointId, status) {
   return row
 }
 
-// 永久删除前锁定知识点并检查现有关联
+// 永久删除知识点及其分类和前置关联
 export async function deletePoint(user, pointId) {
   requireAdmin(user)
   return tx(async db => {
+    await db.query("UPDATE content_graph_locks SET generation=generation+1 WHERE scope='knowledge_prerequisites'")
     const point = (await db.query('SELECT id FROM knowledge_points WHERE id=$1 FOR UPDATE', [pointId])).rows[0]
     if (!point) throw notFound('知识点')
-    const categories = (await db.query('SELECT category_id FROM knowledge_point_categories WHERE knowledge_point_id=$1 ORDER BY category_id LIMIT 101', [pointId])).rows
-    const prerequisites = (await db.query('SELECT prerequisite_id FROM knowledge_prerequisites WHERE knowledge_point_id=$1 ORDER BY prerequisite_id LIMIT 101', [pointId])).rows
-    const dependents = (await db.query('SELECT knowledge_point_id FROM knowledge_prerequisites WHERE prerequisite_id=$1 ORDER BY knowledge_point_id LIMIT 101', [pointId])).rows
-    if (categories.length || prerequisites.length || dependents.length) {
-      throw conflict('知识点存在分类或前置关联请先解除', {
-        category_ids: categories.slice(0,100).map(row => row.category_id),
-        prerequisite_ids: prerequisites.slice(0,100).map(row => row.prerequisite_id),
-        dependent_ids: dependents.slice(0,100).map(row => row.knowledge_point_id),
-        truncated: categories.length > 100 || prerequisites.length > 100 || dependents.length > 100,
-      })
-    }
+    await db.query('DELETE FROM knowledge_point_categories WHERE knowledge_point_id=$1', [pointId])
+    await db.query('DELETE FROM knowledge_prerequisites WHERE knowledge_point_id=$1 OR prerequisite_id=$1', [pointId])
     await db.query('DELETE FROM knowledge_points WHERE id=$1', [pointId])
   })
 }
 
-// 永久删除前检查分类下的子分类和知识点
+// 删除分类树并保留关联其他分类的知识点
 export async function deleteKnowledgeCategory(user, categoryId) {
   requireAdmin(user)
   return tx(async db => {
     await db.query("UPDATE content_graph_locks SET generation=generation+1 WHERE scope='knowledge_categories'")
-    const category = (await db.query('SELECT id FROM knowledge_categories WHERE id=$1 FOR UPDATE', [categoryId])).rows[0]
-    if (!category) throw notFound('知识分类')
-    const children = (await db.query('SELECT id FROM knowledge_categories WHERE parent_id=$1 ORDER BY id LIMIT 101', [categoryId])).rows
-    const points = (await db.query('SELECT knowledge_point_id FROM knowledge_point_categories WHERE category_id=$1 ORDER BY knowledge_point_id LIMIT 101', [categoryId])).rows
-    if (children.length || points.length) {
-      throw conflict('知识分类存在子分类或知识点请先解除关联', {
-        child_category_ids: children.slice(0,100).map(row => row.id),
-        knowledge_point_ids: points.slice(0,100).map(row => row.knowledge_point_id),
-        truncated: children.length > 100 || points.length > 100,
-      })
+    await db.query("UPDATE content_graph_locks SET generation=generation+1 WHERE scope='knowledge_prerequisites'")
+    const tree = (await db.query(
+      `WITH RECURSIVE subtree AS (
+         SELECT id,parent_id,0 AS depth FROM knowledge_categories WHERE id=$1
+         UNION ALL
+         SELECT c.id,c.parent_id,s.depth+1 FROM knowledge_categories c JOIN subtree s ON c.parent_id=s.id
+       ) SELECT id,depth FROM subtree ORDER BY depth DESC,id`, [categoryId],
+    )).rows
+    if (!tree.length) throw notFound('知识分类')
+    const categoryIds = tree.map(category => category.id)
+    await db.query('SELECT id FROM knowledge_categories WHERE id=ANY($1::bigint[]) ORDER BY id FOR UPDATE', [categoryIds])
+    const candidates = (await db.query(
+      `SELECT p.id FROM knowledge_points p WHERE EXISTS (
+         SELECT 1 FROM knowledge_point_categories pc WHERE pc.knowledge_point_id=p.id AND pc.category_id=ANY($1::bigint[])
+       ) ORDER BY p.id FOR UPDATE`, [categoryIds],
+    )).rows.map(point => point.id)
+    const associations = candidates.length ? (await db.query(
+      'SELECT knowledge_point_id,category_id FROM knowledge_point_categories WHERE knowledge_point_id=ANY($1::bigint[]) ORDER BY knowledge_point_id,category_id FOR UPDATE',
+      [candidates],
+    )).rows : []
+    const inside = new Set(categoryIds)
+    const groups = new Map()
+    for (const row of associations) {
+      if (!groups.has(row.knowledge_point_id)) groups.set(row.knowledge_point_id, [])
+      groups.get(row.knowledge_point_id).push(row.category_id)
     }
-    await db.query('DELETE FROM knowledge_categories WHERE id=$1', [categoryId])
+    const removedPoints = [...groups].filter(([, ids]) => ids.some(id => inside.has(id)) && ids.every(id => inside.has(id))).map(([id]) => id)
+    await db.query('DELETE FROM knowledge_point_categories WHERE category_id=ANY($1::bigint[])', [categoryIds])
+    if (removedPoints.length) {
+      await db.query('DELETE FROM knowledge_prerequisites WHERE knowledge_point_id=ANY($1::bigint[]) OR prerequisite_id=ANY($1::bigint[])', [removedPoints])
+      await db.query('DELETE FROM knowledge_points WHERE id=ANY($1::bigint[])', [removedPoints])
+    }
+    for (const category of tree) await db.query('DELETE FROM knowledge_categories WHERE id=$1', [category.id])
   })
 }
 
@@ -203,6 +216,7 @@ export async function setPrerequisites(user, pointId, ids) {
   requireAdmin(user)
   if (new Set(ids).size !== ids.length) throw badRequest('前置知识点不能重复')
   return tx(async (db) => {
+    await db.query("UPDATE content_graph_locks SET generation=generation+1 WHERE scope='knowledge_prerequisites'")
     if (!(await db.query('SELECT id FROM knowledge_points WHERE id=$1 FOR UPDATE', [pointId])).rowCount) throw notFound('知识点')
     await db.query('DELETE FROM knowledge_prerequisites WHERE knowledge_point_id = $1', [pointId])
     for (const prereq of ids) {
@@ -226,6 +240,7 @@ export async function setCategories(user, pointId, ids) {
   requireAdmin(user)
   if (new Set(ids).size !== ids.length) throw badRequest('知识分类不能重复')
   return tx(async (db) => {
+    await db.query("UPDATE content_graph_locks SET generation=generation+1 WHERE scope='knowledge_categories'")
     if (!(await db.query('SELECT id FROM knowledge_points WHERE id=$1 FOR UPDATE', [pointId])).rowCount) throw notFound('知识点')
     await db.query('DELETE FROM knowledge_point_categories WHERE knowledge_point_id=$1', [pointId])
     for (const categoryId of ids) {

@@ -45,7 +45,8 @@ test('并发替换前置关系只保留一次完整提交', { skip: !enabled, ti
       const activity = await pool.query(
         `SELECT count(*) AS count FROM pg_stat_activity
           WHERE datname=current_database() AND wait_event_type='Lock'
-            AND (query LIKE 'DELETE FROM knowledge_prerequisites%'
+            AND (query LIKE 'UPDATE content_graph_locks SET generation=generation+1 WHERE scope=%'
+              OR query LIKE 'DELETE FROM knowledge_prerequisites%'
               OR query LIKE 'SELECT id FROM knowledge_points WHERE id=%FOR UPDATE%')`,
       )
       if (Number(activity.rows[0].count) >= 2) {
