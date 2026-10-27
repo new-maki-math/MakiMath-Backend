@@ -115,7 +115,7 @@ CREATE INDEX lecture_categories_parent_idx ON lecture_categories (parent_id, pos
 CREATE TABLE knowledge_points (
   id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 知识点永久标识
   slug               text        NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'), -- 知识点别名
-  status             text        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled', 'archived')), -- 知识点生命周期状态
+  status             text        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')), -- 知识点生命周期状态
   title              text        NOT NULL CHECK (btrim(title) <> ''), -- 知识点标题
   source             text        NOT NULL CHECK (btrim(source) <> ''), -- 知识点正文
   created_by         bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 知识点创建人

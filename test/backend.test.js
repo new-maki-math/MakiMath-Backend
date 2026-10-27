@@ -5,7 +5,7 @@ import { pool } from '../src/db/pool.js'
 import { encryptPayload } from '../src/lib/crypto.js'
 import { lectureAccess } from '../src/services/access.js'
 import { submit as submitLecture } from '../src/services/lectures.js'
-import { setPrerequisites, create as createKnowledge, manage as manageKnowledge } from '../src/services/knowledge.js'
+import { setPrerequisites, setPointStatus, create as createKnowledge, manage as manageKnowledge } from '../src/services/knowledge.js'
 import { normalizeIp } from '../src/lib/util.js'
 import { animation } from '../src/lib/validate.js'
 
@@ -33,7 +33,7 @@ test('知识点维护只允许管理员操作', async () => {
 test('知识点管理列表返回全部分类并转换整数', async () => {
   const originalQuery = pool.query
   pool.query = async () => ({ rows: [
-    { id: 1, status: 'disabled', category_ids: ['2', '3'] },
+    { id: 1, status: 'active', category_ids: ['2', '3'] },
     { id: 2, status: 'archived', category_ids: [] },
   ] })
   try {
@@ -43,6 +43,11 @@ test('知识点管理列表返回全部分类并转换整数', async () => {
   } finally {
     pool.query = originalQuery
   }
+})
+
+test('知识点状态只接受启用和归档', async () => {
+  await assert.rejects(() => setPointStatus({ id: 1, role: 'super_admin' }, 1, 'disabled'), { status: 400 })
+  await assert.rejects(() => setPointStatus({ id: 2, role: 'editor' }, 1, 'archived'), { status: 403 })
 })
 
 test('客户端地址转换', () => {

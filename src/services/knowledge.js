@@ -152,6 +152,7 @@ export async function updateCategory(user, kind, categoryId, data) {
 
 export async function setPointStatus(user, pointId, status) {
   requireAdmin(user)
+  if (!['active','archived'].includes(status)) throw badRequest('知识点状态不合法')
   const row = (await query('UPDATE knowledge_points SET status=$1,updated_by=$2 WHERE id=$3 RETURNING *', [status,user.id,pointId])).rows[0]
   if (!row) throw notFound('知识点')
   return row

@@ -72,7 +72,7 @@ export default async function knowledgeRoutes(app) {
   })
   app.patch('/knowledge-points/:id/status', { preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['status'], ['status'])
-    return service.setPointStatus(req.user, id(req.params.id), choice(d.status, ['active','disabled','archived']))
+    return service.setPointStatus(req.user, id(req.params.id), choice(d.status, ['active','archived']))
   })
   app.put('/knowledge-points/:id/prerequisites', { preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['prerequisites'], ['prerequisites'])
