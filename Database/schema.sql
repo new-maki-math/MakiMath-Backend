@@ -315,26 +315,6 @@ CREATE TABLE lecture_sections (
     REFERENCES lecture_chapters(lecture_revision_id, id) ON DELETE RESTRICT
 );
 
--- 小节知识点引用由源码解析生成
-CREATE TABLE lecture_knowledge_references (
-  id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 引用记录标识
-  lecture_revision_id bigint      NOT NULL REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 所属讲义版本
-  section_id          bigint      NOT NULL, -- 所属小节
-  occurrence_id       uuid        NOT NULL, -- 引用实例标识
-  knowledge_point_id  bigint      NOT NULL REFERENCES knowledge_points(id) ON DELETE RESTRICT, -- 知识点永久标识
-  source_offset       integer     NOT NULL CHECK (source_offset >= 0), -- 源码中的起始位置
-  source_length       integer     NOT NULL CHECK (source_length > 0), -- 引用源码长度
-  created_at          timestamptz NOT NULL DEFAULT now(), -- 创建时间
-  updated_at          timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  UNIQUE (lecture_revision_id, occurrence_id),
-  UNIQUE (section_id, source_offset),
-  CONSTRAINT lecture_knowledge_references_section_fk FOREIGN KEY (lecture_revision_id, section_id)
-    REFERENCES lecture_sections(lecture_revision_id, id) ON DELETE RESTRICT
-);
-
-CREATE INDEX lecture_knowledge_references_revision_idx ON lecture_knowledge_references (lecture_revision_id);
-CREATE INDEX lecture_knowledge_references_point_idx ON lecture_knowledge_references (knowledge_point_id);
-
 -- 讲义审核记录绑定完整讲义版本
 CREATE TABLE lecture_reviews (
   id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 审核记录标识
@@ -652,8 +632,6 @@ CREATE TRIGGER lecture_revisions_guard BEFORE INSERT OR UPDATE OR DELETE ON lect
 CREATE TRIGGER lecture_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_chapters
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
 CREATE TRIGGER lecture_sections_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_sections
-  FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
-CREATE TRIGGER lecture_knowledge_references_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_knowledge_references
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
 
 CREATE TRIGGER knowledge_points_public_guard BEFORE INSERT OR UPDATE ON knowledge_points

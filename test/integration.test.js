@@ -76,6 +76,14 @@ test('知识点审核与讲义发布完整流程', { skip: !enabled }, async () 
     ])
     assert.deepEqual(concurrent.map(r => r.status).sort(), [200, 409])
     const saved = concurrent.find(r => r.status === 200)
+    const duplicate = structuredClone(draft)
+    duplicate.edit_version = saved.data.revision.edit_version
+    duplicate.chapters[0].sections[0].source = saved.data.chapters[0].sections[0].source
+    duplicate.chapters[0].sections.push({ slug: 'section-two', source: saved.data.chapters[0].sections[0].source })
+    assert.equal((await call('PUT', `/lecture-revisions/${revisionId}`, duplicate, editor)).status, 409)
+    const afterDuplicate = await call('GET', `/lecture-revisions/${revisionId}`, undefined, editor)
+    assert.equal(afterDuplicate.data.revision.edit_version, saved.data.revision.edit_version)
+    assert.equal(afterDuplicate.data.chapters[0].sections.length, 1)
     assert.equal((await call('GET', '/lectures/' + lectureId)).status, 404)
     const submissions = await Promise.all([
       call('POST', `/lecture-revisions/${revisionId}/submit`, { edit_version: saved.data.revision.edit_version }, editor),
@@ -121,6 +129,8 @@ test('知识点审核与讲义发布完整流程', { skip: !enabled }, async () 
     assert.equal((await call('POST', `/reviews/knowledge/${later.data.id}`, { decision: 'approved', comment: '' }, admin)).status, 201)
     const unchanged = await call('GET', '/lectures/' + lectureId)
     assert.equal(unchanged.data.chapters[0].sections[0].references[0].knowledge_source, '修订正文')
+    const dynamicSearch = await call('GET', '/search?q=修订正文')
+    assert.ok(dynamicSearch.data.hits.some(hit => hit.type === 'lecture' && hit.id === lectureId))
     const savedRef = published.data.chapters[0].sections[0].references[0].occurrence_id
     assert.equal(unchanged.data.chapters[0].sections[0].references[0].occurrence_id, savedRef)
     assert.equal((await call('PATCH', `/knowledge-points/${pointId}/status`, { status: 'disabled' }, admin)).status, 200)
