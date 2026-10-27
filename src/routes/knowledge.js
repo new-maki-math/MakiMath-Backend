@@ -39,6 +39,14 @@ export default async function knowledgeRoutes(app) {
     string(d.source, 200000)
     return service.save(req.user, id(req.params.id), d)
   })
+  app.delete('/knowledge-points/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    await service.deletePoint(req.user, id(req.params.id))
+    reply.code(204)
+  })
+  app.delete('/categories/knowledge/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    await service.deleteKnowledgeCategory(req.user, id(req.params.id))
+    reply.code(204)
+  })
   app.get('/categories/:kind', async req =>
     service.categories(choice(req.params.kind, ['knowledge','lecture'])))
   app.post('/categories/:kind', { preHandler: [app.requireLogin] }, async (req, reply) => {

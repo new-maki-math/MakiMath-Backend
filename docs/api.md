@@ -45,6 +45,8 @@
 | POST | `/knowledge-points` | 管理员提交 `slug`、`title`、`source`，返回新知识点 |
 | POST | `/knowledge-points/import` | 管理员向有效一级分类原子导入分类、知识点及前置关系 |
 | PUT | `/knowledge-points/:id` | 管理员提交 `title`、`source`，立即更新 |
+| DELETE | `/knowledge-points/:id` | 管理员永久删除没有分类及前置关系的知识点 |
+| DELETE | `/categories/knowledge/:id` | 管理员永久删除没有子分类和知识点的知识分类 |
 | GET | `/knowledge-points/:id/prerequisites` | 获取有效的前置知识点 |
 | PUT | `/knowledge-points/:id/prerequisites` | 管理员提交 `{ "prerequisites": [1, 2] }` |
 | PUT | `/knowledge-points/:id/categories` | 管理员提交 `{ "categories": [1, 2] }` |
@@ -61,6 +63,14 @@
 管理列表的 `category_ids` 为该知识点所有直接关联的分类永久 ID，按 ID 升序排列，包括已归档分类；无关联时为 `[]`。知识点自身无论是 `active`、`disabled` 还是 `archived` 都会返回。`GET /categories/knowledge` 只返回有效分类，因此不在分类接口结果中的 ID 仍可能是已归档的现有关联，前端不能把它当成不存在并在整体替换分类时自动删除。`PUT /knowledge-points/:id/categories` 会整体替换关联，若不打算移除归档分类，应一并保留这些 ID。管理详情接口暂不返回 `category_ids`，管理列表是该字段的数据来源。
 
 知识点公开列表、详情、管理查询及搜索设置 `Cache-Control: no-store`。本分支没有知识地图接口；尚未合并的地图功能需按此模型同步，不提供知识点 `revision_id` 或 `summary`。
+
+### 永久删除
+
+永久删除接口仅允许 `super_admin`，无需请求体；成功返回 204 且无响应体，不存在返回 404，未登录返回 401，非管理员返回 403。知识点存在直接分类、前置知识点或依赖它的后续知识点时返回 409，所有状态的关联都会阻止删除。分类存在子分类或直接关联知识点时返回 409，包含已归档分类与停用知识点。删除前需显式解除这些关联；接口不会级联删除内容或关系。
+
+409 错误的 `details`：知识点提供 `category_ids`、`prerequisite_ids`、`dependent_ids`；分类提供 `child_category_ids`、`knowledge_point_ids`。每种最多返回 100 个 ID，`truncated` 为 `true` 表示至少一组结果被截断。前端应保留后端错误并提示用户先处理关联，不应将归档当成永久删除。
+
+讲义只保存源码，后端不维护或扫描知识点引用关系，删除时无法判断哪些讲义引用该知识点。删除后讲义源码保持原样，前端读取缺失知识点时显示局部占位；浏览器本地的掌握记录和批注也不会自动清理。永久删除不可撤销，操作前由客户端明确提示这些影响。
 
 ### 知识点批量导入
 
