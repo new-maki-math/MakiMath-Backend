@@ -26,6 +26,38 @@ function validateTree(chapters) {
   }
 }
 
+function validateImport(data) {
+  body(data, ['type','schema_version','lecture','chapters'], ['type','schema_version','lecture','chapters'])
+  if (data.type !== 'maki-lecture' || data.schema_version !== 1) throw badRequest('讲义文件类型或版本不支持')
+  const lecture = body(data.lecture, ['slug','title','subtitle','summary','typst_version','metadata'], ['slug','title','subtitle','summary','typst_version','metadata'])
+  slug(lecture.slug)
+  string(lecture.title, 200)
+  string(lecture.subtitle, 500, true)
+  string(lecture.summary, 5000, true)
+  string(lecture.typst_version, 50)
+  object(lecture.metadata)
+  const chapterSlugs = new Set()
+  let count = 0
+  for (const chapter of list(data.chapters, 100)) {
+    body(chapter, ['slug','tag','title','summary','sections'], ['slug','tag','title','summary','sections'])
+    string(chapter.slug, 100)
+    if (chapterSlugs.has(chapter.slug)) throw badRequest('章节标识重复')
+    chapterSlugs.add(chapter.slug)
+    for (const field of ['tag','title','summary']) string(chapter[field], 5000, true)
+    const sectionSlugs = new Set()
+    for (const section of list(chapter.sections, 200)) {
+      body(section, ['slug','tag','title','summary','source'], ['slug','tag','title','summary','source'])
+      string(section.slug, 100)
+      if (sectionSlugs.has(section.slug)) throw badRequest('小节标识重复')
+      sectionSlugs.add(section.slug)
+      for (const field of ['tag','title','summary']) string(section[field], 5000, true)
+      string(section.source, 200000, true)
+      if (++count > 2000) throw badRequest('讲义小节数量超出限制')
+    }
+  }
+  return data
+}
+
 export default async function lectureRoutes(app) {
   app.get('/lectures', async () => service.publicList())
   app.get('/lectures/mine', { preHandler: [app.requireLogin] }, async req => service.mine(req.user))
@@ -47,6 +79,11 @@ export default async function lectureRoutes(app) {
     reply.code(201)
     return result
   })
+  app.post('/lectures/import', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const result = await service.importLecture(req.user, validateImport(req.body))
+    reply.code(201)
+    return result
+  })
   app.get('/lectures/:id/revisions', { preHandler: [app.requireLogin] }, async req =>
     service.revisions(req.user, id(req.params.id)))
   app.post('/lectures/:id/revisions', { preHandler: [app.requireLogin] }, async (req, reply) => {
@@ -58,6 +95,10 @@ export default async function lectureRoutes(app) {
   app.get('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.revision(req.user, id(req.params.id))
+  })
+  app.get('/lecture-revisions/:id/export', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.exportRevision(req.user, id(req.params.id))
   })
   app.put('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
     const fields = ['edit_version','title','subtitle','descr','category_id','typst_version','metadata','change_note','chapters']

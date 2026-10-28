@@ -133,6 +133,54 @@ async function insertTree(db, revisionId, chapters) {
   }
 }
 
+export async function importLecture(user, data) {
+  requireUser(user)
+  return tx(async db => {
+    const input = data.lecture
+    let lecture
+    try {
+      lecture = (await db.query('INSERT INTO lectures(slug,owner_id) VALUES ($1,$2) RETURNING *', [input.slug,user.id])).rows[0]
+    } catch (err) {
+      if (err.code === '23505' && err.constraint === 'lectures_slug_key') throw conflict('讲义标识已存在请更换标识')
+      throw err
+    }
+    const revision = (await db.query(
+      `INSERT INTO lecture_revisions(lecture_id,revision_no,title,subtitle,descr,typst_version,metadata,created_by)
+       VALUES ($1,1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [lecture.id,input.title,input.subtitle,input.summary,input.typst_version,input.metadata,user.id],
+    )).rows[0]
+    await insertTree(db, revision.id, data.chapters)
+    return { lecture, revision }
+  })
+}
+
+export async function exportRevision(user, revisionId) {
+  return tx(async db => {
+    const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
+    if (!initial) throw notFound('讲义版本')
+    const lecture = (await db.query('SELECT * FROM lectures WHERE id=$1 FOR SHARE', [initial.lecture_id])).rows[0]
+    if (!lecture) throw notFound('讲义')
+    const selected = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR SHARE', [revisionId])).rows[0]
+    if (!selected) throw notFound('讲义版本')
+    let authorized = Boolean(user && (user.role === 'super_admin' || user.id === lecture.owner_id))
+    if (user && !authorized) {
+      authorized = Boolean((await db.query('SELECT 1 FROM lecture_collaborators WHERE lecture_id=$1 AND user_id=$2', [lecture.id,user.id])).rows[0])
+    }
+    const published = lecture.publication_status === 'published' && lecture.public_revision_id === selected.id && selected.status === 'approved'
+    if (!authorized && !published) throw notFound('讲义版本')
+    requireUnarchived(lecture)
+    const tree = await snapshot(db, revisionId)
+    return {
+      type: 'maki-lecture', schema_version: 1,
+      lecture: { slug: lecture.slug, title: selected.title, subtitle: selected.subtitle, summary: selected.descr, typst_version: selected.typst_version, metadata: selected.metadata },
+      chapters: tree.chapters.map(chapter => ({
+        slug: chapter.slug, tag: chapter.tag, title: chapter.title, summary: chapter.summary,
+        sections: chapter.sections.map(section => ({ slug: section.slug, tag: section.tag, title: section.title, summary: section.summary, source: section.source })),
+      })),
+    }
+  })
+}
+
 export async function copyRevision(user, lectureId, baseId) {
   requireUser(user)
   return tx(async (db) => {

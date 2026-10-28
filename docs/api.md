@@ -145,9 +145,11 @@
 | GET | `/lectures/mine` | 登录用户有权访问的讲义列表，包括协作者与管理员可见讲义 |
 | GET | `/lectures/owned` | 登录用户作为所有者的讲义及版本摘要 |
 | POST | `/lectures` | 提交 `slug`、`title`，返回 `lecture` 和首个草稿 `revision` |
+| POST | `/lectures/import` | 导入可移植讲义 JSON，事务创建讲义及工作草稿 |
 | GET | `/lectures/:id/revisions` | 读取有权访问的讲义版本列表 |
 | POST | `/lectures/:id/revisions` | 提交 `based_on_id` 复制快照；已有工作草稿时返回 409 |
 | GET | `/lecture-revisions/:id` | 读取有权访问的完整版本 |
+| GET | `/lecture-revisions/:id/export` | 导出指定版本的完整可移植讲义 JSON |
 | PUT | `/lecture-revisions/:id` | 以完整目录树替换草稿 |
 | POST | `/lecture-revisions/:id/submit` | 提交草稿 `edit_version`，生成独立待审快照并返回 `snapshot` 和 `draft_edit_version` |
 | GET | `/lectures/:id/collaborators` | 有权查看讲义的用户读取协作者 |
@@ -165,7 +167,38 @@
 
 已有数据库需由用户另行审核并手工执行 `Database/manual/allow-archived-lecture-deletion.sql`，初始化数据库使用更新后的 `Database/schema.sql`。脚本只调整约束和触发函数，不清理数据。删除权限由服务端认证与授权检查执行，数据库中的事务局部标记用于限定冻结保护的删除例外，不能代替数据库账号权限管理。
 
-当前没有专用讲义导出接口。授权阅读接口仍返回小节源码，前端应禁止对归档讲义提供下载功能，但无法阻止已获授权的读者复制阅读内容。
+归档讲义的导出接口会拒绝下载。授权阅读接口仍返回小节源码，前端应禁止对归档讲义提供下载功能，但无法阻止已获授权的读者复制阅读内容。
+
+### 讲义 JSON 导入与导出
+
+在线和本地共用以下 JSON 格式，章节和小节的数组顺序即显示顺序。`summary` 对应讲义版本的 `descr`，`metadata` 原样保存渲染配置，`source` 是完整 Typst 源码。
+
+```json
+{
+  "type": "maki-lecture",
+  "schema_version": 1,
+  "lecture": {
+    "slug": "example-lecture",
+    "title": "示例讲义",
+    "subtitle": "",
+    "summary": "讲义简介",
+    "typst_version": "0.15.1",
+    "metadata": {}
+  },
+  "chapters": [{
+    "slug": "chapter-1", "tag": "一", "title": "第一章", "summary": "",
+    "sections": [{ "slug": "section-1", "tag": "1", "title": "第一节", "summary": "", "source": "#mm-knowledge(slug: \"sequence-limit\")" }]
+  }]
+}
+```
+
+上述字段均必填，额外字段会被拒绝。讲义 slug 遵循平台别名格式，标题不为空；`metadata` 为对象。章节最多 100 个，每章最多 200 节，总计最多 2000 节；章节 slug 在讲义内唯一，小节 slug 在章内唯一，均为非空字符串且最多 100 字符。讲义标题最多 200 字符，副标题最多 500 字符，简介最多 5000 字符，排版版本最多 50 字符，章节和小节的 `tag`、`title`、`summary` 最多 5000 字符，小节源码最多 200000 字符。空章节和空正文允许导入，提交审核仍按原规则检查。
+
+`GET /api/lecture-revisions/:id/export` 导出一个明确的版本，匿名用户仅能导出当前公开的已审核版本，所有者、协作者和管理员可导出有权查看的非归档版本。归档讲义返回 409；不存在或无权访问返回 404。读取时锁定讲义和版本，返回完整目录及源码，响应 `Cache-Control: no-store`。前端若有未保存修改，应提示先保存再导出，不应导出不完整的本地缓存。
+
+`POST /api/lectures/import` 的请求体就是上述 JSON，使用既有加密通信，登录的编者或管理员可调用。成功返回 201 和 `{ "lecture": ..., "revision": ... }`，新建未发布讲义与工作草稿，所有者取当前会话，不覆盖现有内容。别名冲突返回 409，修改 `lecture.slug` 后可重试；格式错误返回 400。写入在一个事务中完成，失败回滚。现有 HTTP 请求体限制为 4 MiB，限制计算在加密后的请求体上。
+
+文件不包含数据库主键、实例 UUID、归属、协作者、审核或发布状态，也不包含讲义分类 ID；导入后分类需重新选择。`metadata` 按用户提供的对象原样保留，前端应只放入需要迁移的渲染配置，不放身份和鉴权信息。源码中的知识点引用保持原文，不检查或映射 slug，目标环境中的 slug 可能不存在或指向其他知识点。小节内容模型没有独立动画字段，动画如属于源码则随源码保留。
 
 `GET /api/lectures/owned` 用于“我创作的讲义”，只返回当前会话用户作为所有者的讲义，管理员也只能通过该接口取得本人作品。未登录或会话失效返回 401，没有本人讲义返回 `200 []`。查询使用一次数据库查询，响应为数组：
 
