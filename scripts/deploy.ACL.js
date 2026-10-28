@@ -2,30 +2,30 @@
  * MakiMath 后端一键部署脚本
  *
  * 用法：
- *   node scripts/deploy.js          # 或 npm run deploy
+ *   node scripts/deploy.ACL.js      # 或 npm run deploy
  *
  * 流程：
  *   1. 读取 backend/deploy.config.json（可用 DEPLOY_* 环境变量覆盖敏感字段）
  *   2. 收集本地后端源码（排除 node_modules / data / .env / deploy.config.json）
  *   3. SSH 上传到服务器临时目录
- *   4. 远程准备 Node.js 22 + pm2（按需安装 PostgreSQL）
+ *   4. 远程检查 Node.js 22 和数据库配置
  *   5. 同步代码到远端 backend 目录，生成或保留 .env
- *   6. npm install --omit=dev，必要时初始化数据库与表结构
- *   7. pm2 重启服务并做 /health 健康检查
+ *   6. npm ci --omit=dev，按配置决定是否初始化空数据库
+ *   7. systemd 重启服务并核对 /health 中的数据库名称
  *
  * deploy.config.json 支持的字段：
  *   host            服务器地址（必填）
  *   port            SSH 端口，默认 22
- *   username        SSH 用户（必填，建议 root）
- *   password        SSH 密码（必填）
+ *   username        SSH 用户（必填，需具备部署所需权限）
+ *   password        SSH 密码，与 privateKeyPath 二选一
+ *   privateKeyPath  本地 SSH 私钥路径
  *   remoteBaseDir   远端根目录，默认 /var/www/maki-math
  *   backendPort     后端监听端口，默认 3000
- *   pm2Name         pm2 进程名，默认 maki-math-backend
  *   setupDatabase   是否自动安装 / 初始化 PostgreSQL，默认 true
  *   forceSchema     清库重建开关，默认 false / 省略。
  *                   只有写成字符串 "DROP_AND_REBUILD" 才会执行
  *                   DROP SCHEMA public CASCADE 并重跑 Database/schema.sql。
- *                   这是销毁性操作：全部业务数据清空，超管重置为 makimath_root。
+ *                   这是销毁性操作：全部业务数据清空，不会自动创建管理员。
  *                   不支持写 true（会被拒绝），避免手滑误删。
  *   db              { name, user, password }，setupDatabase 为 true 时必填；
  *                   name 与 user 只允许字母数字下划线，password 不能含空白
@@ -66,7 +66,6 @@ const config = {
     "",
   remoteBaseDir: process.env.DEPLOY_BASE_DIR || fileConfig.remoteBaseDir || "/var/www/maki-math",
   backendPort: Number(process.env.DEPLOY_BACKEND_PORT || fileConfig.backendPort || 3000),
-  pm2Name: process.env.DEPLOY_PM2_NAME || fileConfig.pm2Name || "maki-math-backend",
   setupDatabase: fileConfig.setupDatabase !== false,
   // 只有字面量 "DROP_AND_REBUILD" 才触发清库重建，避免 true/false 手滑造成数据丢失
   forceSchema: (process.env.DEPLOY_FORCE_SCHEMA || fileConfig.forceSchema) === "DROP_AND_REBUILD",
@@ -104,6 +103,11 @@ if (config.forceSchemaRaw !== undefined && config.forceSchemaRaw !== false && !c
       `  收到的是 ${JSON.stringify(config.forceSchemaRaw)}——它会清空数据库全部业务数据，\n` +
       `  所以不支持用 true 简写。确需重建请写成 "forceSchema": "DROP_AND_REBUILD"。`,
   )
+  process.exit(1)
+}
+
+if (!config.setupDatabase && config.forceSchema) {
+  console.error("复用已有数据库时不允许启用清库重建。")
   process.exit(1)
 }
 
@@ -263,6 +267,7 @@ async function main() {
 
   const remotePrep = await ssh.execCommand(`
 set -e
+mkdir -p -m 700 ${quote(remoteTmpBase)}
 mkdir -p ${quote(remoteUploadDir)}
 mkdir -p ${quote(remoteBackendDir)}
 mkdir -p ${quote(`${remoteBackendDir}/data/pdfs`)}
@@ -305,11 +310,11 @@ mkdir -p ${quote(`${remoteBackendDir}/data/images`)}
 set -e
 
 export DEBIAN_FRONTEND=noninteractive
+export PATH="/opt/node/bin:$PATH"
 
 BACKEND_DIR=${quote(remoteBackendDir)}
 UPLOAD_DIR=${quote(remoteUploadDir)}
 TMP_DIR=${quote(remoteTmpBase)}
-PM2_NAME=${quote(config.pm2Name)}
 APP_PORT=${quote(String(config.backendPort))}
 DB_NAME=${quote(config.db.name)}
 DB_USER=${quote(config.db.user)}
@@ -351,10 +356,41 @@ fi
 
 echo "Node.js $(node -v)"
 
+# ---------- 2. 已有数据库预检 ----------
+if [ "$SETUP_DB" = "0" ]; then
+  step "只读核对已有目标数据库"
+  CHECK_ENV="$ENV_SRC"
+  if [ -z "$CHECK_ENV" ]; then CHECK_ENV="$BACKEND_DIR/.env"; fi
+  if [ ! -f "$CHECK_ENV" ]; then
+    echo "缺少目标数据库连接配置，停止部署。" >&2
+    exit 1
+  fi
+  cat > "$TMP_DIR/check-db.cjs" <<'CHECKDB'
+const pg = require(process.argv[2] + '/node_modules/pg');
+const db = new pg.Client();
+(async () => {
+  try {
+    await db.connect();
+    await db.query('BEGIN READ ONLY');
+    const row = (await db.query("SELECT current_database() AS database, to_regclass('public.lectures') AS lectures, to_regclass('public.lecture_revisions') AS revisions, to_regclass('public.knowledge_points') AS points")).rows[0];
+    if (row.database !== process.argv[3] || !row.lectures || !row.revisions || !row.points) throw new Error('目标数据库名称或新版业务表不匹配');
+    await db.query('COMMIT');
+    console.log('目标数据库已就绪：' + row.database);
+  } catch (error) {
+    console.error('数据库预检失败：' + error.message);
+    process.exitCode = 1;
+  } finally {
+    await db.end().catch(() => {});
+  }
+})();
+CHECKDB
+  node --env-file="$CHECK_ENV" "$TMP_DIR/check-db.cjs" "$BACKEND_DIR" "$DB_NAME"
+fi
+
 # ---------- 3. 同步代码 ----------
 step "同步后端代码到 $BACKEND_DIR"
 mkdir -p "$BACKEND_DIR" "$BACKEND_DIR/data/pdfs" "$BACKEND_DIR/data/images"
-find "$BACKEND_DIR" -mindepth 1 -maxdepth 1 ! -name data ! -name .env -exec rm -rf {} +
+find "$BACKEND_DIR" -mindepth 1 -maxdepth 1 ! -name data ! -name .env ! -name node_modules ! -name .deps-hash -exec rm -rf {} +
 cp -a "$UPLOAD_DIR/." "$BACKEND_DIR/"
 
 # ---------- 4. .env ----------
@@ -631,7 +667,7 @@ SERVICE_NAME="maki-math-backend"
 
 cat > "/tmp/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=MakiMath Backend V2
+Description=MakiMath Backend
 After=network.target postgresql-17.service
 Wants=postgresql-17.service
 
@@ -661,7 +697,8 @@ step "健康检查 http://127.0.0.1:$APP_PORT/health"
 READY=0
 i=0
 while [ "$i" -lt 30 ]; do
-  if curl -fsS "http://127.0.0.1:$APP_PORT/health" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$APP_PORT/health" -o "$TMP_DIR/health.json" &&
+     node -e 'const fs = require("node:fs"); const health = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.exit(health.ok === true && health.database === process.argv[2] ? 0 : 1)' "$TMP_DIR/health.json" "$DB_NAME"; then
     READY=1
     break
   fi
@@ -671,7 +708,7 @@ done
 
 if [ "$READY" != "1" ]; then
   echo "后端健康检查失败，最近日志如下：" >&2
-  sudo journalctl -u maki-math-backend-v2 -n 50 --no-pager >&2 || true
+  sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager >&2 || true
   exit 1
 fi
 
