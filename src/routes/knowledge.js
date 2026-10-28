@@ -15,6 +15,10 @@ export default async function knowledgeRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     return service.getPublic(id(req.params.id))
   })
+  app.get('/knowledge-points/by-slug/:slug', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.getPublicBySlug(slug(req.params.slug))
+  })
   app.get('/knowledge-points/manage', { preHandler: [app.requireLogin] }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.manage(req.user)

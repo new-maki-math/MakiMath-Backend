@@ -11,11 +11,22 @@ export async function getPublic(pointId) {
   const row = (await query(
     "SELECT id,slug,title,source FROM knowledge_points WHERE id=$1 AND status='active'", [pointId],
   )).rows[0]
+  return publicDetail(row)
+}
+
+export async function getPublicBySlug(pointSlug) {
+  const row = (await query(
+    "SELECT id,slug,title,source FROM knowledge_points WHERE slug=$1 AND status='active'", [pointSlug],
+  )).rows[0]
+  return publicDetail(row)
+}
+
+async function publicDetail(row) {
   if (!row) throw notFound('知识点')
   const categories = (await query(
     `SELECT c.id,c.slug,c.name FROM knowledge_point_categories pc
        JOIN knowledge_categories c ON c.id=pc.category_id
-      WHERE pc.knowledge_point_id=$1 AND c.status='active' ORDER BY c.pos,c.id`, [pointId],
+      WHERE pc.knowledge_point_id=$1 AND c.status='active' ORDER BY c.pos,c.id`, [row.id],
   )).rows
   return { ...row, categories }
 }

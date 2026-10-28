@@ -40,6 +40,7 @@
 | --- | --- | --- |
 | GET | `/knowledge-points` | 公开有效知识点列表，返回 `id`、`slug`、`title` |
 | GET | `/knowledge-points/:id` | 公开有效知识点详情，返回 `id`、`slug`、`title`、`source` 和 `categories` |
+| GET | `/knowledge-points/by-slug/:slug` | 通过别名读取公开有效知识点详情 |
 | GET | `/knowledge-points/manage` | 管理员读取所有状态的知识点列表，包括全部关联分类的 `category_ids` |
 | GET | `/knowledge-points/manage/:id` | 管理员读取任意状态的知识点详情及维护记录 |
 | POST | `/knowledge-points` | 管理员提交 `slug`、`title`、`source`，返回新知识点 |
@@ -59,6 +60,10 @@
 ```
 
 内容编辑请求只需要 `title` 与 `source`。标题和正文不能为空，维护人从登录身份取得。内容更新采用最后一次成功写入的结果，当前没有并发冲突提示。归档后公开详情返回 404，管理员仍可通过管理接口查看并恢复。分类和前置关系由管理员维护，前置关系替换在事务中锁定所属知识点，数据库拒绝循环依赖。
+
+`GET /api/knowledge-points/by-slug/sequence-limit` 允许匿名访问，返回与按 ID 详情相同的 `{ "id": 101, "slug": "sequence-limit", "title": "数列极限", "source": "正文", "categories": [{ "id": 1, "slug": "analysis", "name": "分析" }] }`，分类仅包含有效分类。`id` 是用于掌握状态的永久身份；slug 不合法返回 400，知识点不存在或已归档返回 404。该公开接口即使由管理员调用也不返回已归档知识点；管理详情仍按原有管理员权限通过 ID 读取。响应设置 `Cache-Control: no-store`。
+
+知识点 slug 在数据库中全局唯一，当前业务接口不支持修改，但数据库本身未禁止直接修改。若直接改动 slug，旧讲义引用不会随之更新；删除知识点后旧 slug 也可能重新被使用，旧引用可能指向新知识点。维护时应避免改动或复用已引用的 slug。
 
 管理列表的 `category_ids` 为该知识点所有直接关联的分类永久 ID，按 ID 升序排列，包括已归档分类；无关联时为 `[]`。知识点自身无论是 `active` 还是 `archived` 都会返回。`GET /categories/knowledge` 只返回有效分类，因此不在分类接口结果中的 ID 仍可能是已归档的现有关联，前端不能把它当成不存在并在整体替换分类时自动删除。`PUT /knowledge-points/:id/categories` 会整体替换关联，若不打算移除归档分类，应一并保留这些 ID。管理详情接口暂不返回 `category_ids`，管理列表是该字段的数据来源。
 
@@ -199,7 +204,7 @@
         {
           "slug": "section-1",
           "title": "第一节",
-          "source": "讲师引入 #mm-knowledge(1)"
+          "source": "讲师引入 #mm-knowledge(slug: \"sequence-limit\")"
         }
       ]
     }
@@ -209,7 +214,7 @@
 
 保存体中的每个小节只包含完整的 `source`，后端按普通文本原样保存，不解析、改写或校验其中的知识点引用。章节和小节自身的 `occurrence_id` 仍应在后续保存时保留。
 
-前端展示时识别源码中的 `#mm-knowledge(1)`，通过 `GET /api/knowledge-points/1` 读取当前有效知识点。知识点不存在或归档时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前内容。
+前端展示时识别源码中的 `#mm-knowledge(slug: "sequence-limit")`，通过 `GET /api/knowledge-points/by-slug/sequence-limit` 读取当前有效知识点，并以响应中的永久 `id` 关联掌握状态。知识点不存在或归档时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前内容。
 
 后端不会为引用生成实例标识，不返回引用 `references` 或引用 `warnings`，也不限制重复引用、复制和剪切。保存及审核流程不检查引用目标是否存在或公开；引用格式问题不妨碍源码保存。前端只需在渲染讲义时处理能识别的引用，首阶段不递归展开知识点正文中的引用。已存源码中的旧注释也不会被后端自动删除。
 
