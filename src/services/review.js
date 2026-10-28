@@ -1,6 +1,6 @@
 import { query, tx } from '../db/pool.js'
 import { conflict, notFound } from '../lib/errors.js'
-import { requireAdmin } from './access.js'
+import { requireAdmin, requireUnarchived } from './access.js'
 
 export async function pending(user) {
   requireAdmin(user)
@@ -13,6 +13,8 @@ export async function decide(user, kind, revisionId, data) {
     const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
     if (!initial) throw notFound('讲义版本')
     const lecture = (await db.query('SELECT * FROM lectures WHERE id=$1 FOR UPDATE', [initial.lecture_id])).rows[0]
+    if (!lecture) throw notFound('讲义')
+    requireUnarchived(lecture)
     const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (revision.status !== 'pending') throw conflict('该版本不处于待审核状态')
     if (data.decision === 'approved') {

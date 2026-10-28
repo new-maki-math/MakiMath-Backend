@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { query, tx } from '../db/pool.js'
 import { conflict, forbidden, notFound } from '../lib/errors.js'
-import { requireUser, lectureAccess } from './access.js'
+import { requireUser, requireAdmin, lectureAccess, requireUnarchived } from './access.js'
 
 async function snapshot(db, revisionId) {
   const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
@@ -136,7 +136,8 @@ async function insertTree(db, revisionId, chapters) {
 export async function copyRevision(user, lectureId, baseId) {
   requireUser(user)
   return tx(async (db) => {
-    await lectureAccess(db, lectureId, user, 'edit', true)
+    const lecture = await lectureAccess(db, lectureId, user, 'edit', true)
+    requireUnarchived(lecture)
     const draft = (await db.query("SELECT id FROM lecture_revisions WHERE lecture_id=$1 AND status='draft' AND source_draft_id IS NULL", [lectureId])).rows[0]
     if (draft) throw conflict('讲义已有工作草稿', { draft_id: draft.id })
     const base = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 AND lecture_id=$2 FOR UPDATE', [baseId, lectureId])).rows[0]
@@ -159,7 +160,8 @@ export async function save(user, revisionId, data) {
   return tx(async (db) => {
     const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
     if (!initial) throw notFound('讲义版本')
-    await lectureAccess(db, initial.lecture_id, user, 'edit', true)
+    const lecture = await lectureAccess(db, initial.lecture_id, user, 'edit', true)
+    requireUnarchived(lecture)
     const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (revision.status !== 'draft') throw conflict('只有草稿可以编辑')
     if (revision.edit_version !== data.edit_version) throw conflict('草稿已被修改请重新加载')
@@ -181,6 +183,7 @@ export async function submit(user, revisionId, version) {
     const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
     if (!initial) throw notFound('讲义版本')
     const lecture = await lectureAccess(db, initial.lecture_id, user, 'edit', true)
+    requireUnarchived(lecture)
     const row = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (row.status !== 'draft' || row.source_draft_id !== null) throw conflict('只能提交工作草稿')
     if (row.edit_version !== version) throw conflict('草稿已被修改请重新加载')
@@ -211,6 +214,7 @@ export async function setCollaborator(user, lectureId, targetId, permission) {
   requireUser(user)
   return tx(async (db) => {
     const lecture = await lectureAccess(db, lectureId, user, 'owner', true)
+    requireUnarchived(lecture)
     if (lecture.owner_id === targetId) throw conflict('所有者不需要协作者授权')
     const target = (await db.query("SELECT id FROM users WHERE id=$1 AND status='active'", [targetId])).rows[0]
     if (!target) throw notFound('有效用户')
@@ -235,7 +239,8 @@ export async function collaborators(user, lectureId) {
 export async function removeCollaborator(user, lectureId, targetId) {
   requireUser(user)
   return tx(async (db) => {
-    await lectureAccess(db, lectureId, user, 'owner', true)
+    const lecture = await lectureAccess(db, lectureId, user, 'owner', true)
+    requireUnarchived(lecture)
     await db.query('DELETE FROM lecture_collaborators WHERE lecture_id=$1 AND user_id=$2', [lectureId,targetId])
   })
 }
@@ -244,10 +249,37 @@ export async function publication(user, lectureId, status, recommended) {
   requireUser(user)
   return tx(async (db) => {
     const lecture = await lectureAccess(db, lectureId, user, 'owner', true)
+    requireUnarchived(lecture)
     if (recommended !== undefined && user.role !== 'super_admin') throw forbidden('推荐状态由管理员管理')
     const next = status ?? lecture.publication_status
     if (next === 'published' && !lecture.public_revision_id) throw conflict('讲义没有审核通过的版本')
     const flag = next === 'published' ? (recommended ?? lecture.is_recommended) : false
     return (await db.query('UPDATE lectures SET publication_status=$1,is_recommended=$2 WHERE id=$3 RETURNING *', [next,flag,lectureId])).rows[0]
+  })
+}
+
+export async function restore(user, lectureId) {
+  requireUser(user)
+  return tx(async db => {
+    const lecture = await lectureAccess(db, lectureId, user, 'owner', true)
+    if (lecture.publication_status !== 'archived') throw conflict('讲义未归档')
+    const status = lecture.public_revision_id ? 'withdrawn' : 'unpublished'
+    return (await db.query('UPDATE lectures SET publication_status=$1,is_recommended=false WHERE id=$2 RETURNING *', [status,lectureId])).rows[0]
+  })
+}
+
+export async function deleteArchived(user, lectureId) {
+  requireAdmin(user)
+  return tx(async db => {
+    const lecture = await lectureAccess(db, lectureId, user, 'owner', true)
+    if (lecture.publication_status !== 'archived') throw conflict('只有已归档的讲义可以永久删除')
+    await db.query("SELECT set_config('maki.lecture_delete_id', $1, true)", [String(lectureId)])
+    await db.query('UPDATE lectures SET public_revision_id=NULL WHERE id=$1', [lectureId])
+    await db.query('DELETE FROM lecture_reviews WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
+    await db.query('DELETE FROM lecture_sections WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
+    await db.query('DELETE FROM lecture_chapters WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
+    await db.query('DELETE FROM lecture_revisions WHERE lecture_id=$1', [lectureId])
+    await db.query('DELETE FROM lecture_collaborators WHERE lecture_id=$1', [lectureId])
+    await db.query('DELETE FROM lectures WHERE id=$1', [lectureId])
   })
 }

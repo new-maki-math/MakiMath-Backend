@@ -203,9 +203,9 @@ CREATE TABLE lecture_revisions (
   UNIQUE (lecture_id, revision_no),
   UNIQUE (lecture_id, id),
   CONSTRAINT lecture_revisions_base_fk FOREIGN KEY (lecture_id, based_on_id)
-    REFERENCES lecture_revisions(lecture_id, id) ON DELETE RESTRICT,
+    REFERENCES lecture_revisions(lecture_id, id) DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT lecture_revisions_source_draft_fk FOREIGN KEY (lecture_id, source_draft_id)
-    REFERENCES lecture_revisions(lecture_id, id) ON DELETE RESTRICT,
+    REFERENCES lecture_revisions(lecture_id, id) DEFERRABLE INITIALLY DEFERRED,
   CONSTRAINT lecture_revisions_no_self_base CHECK (based_on_id IS DISTINCT FROM id),
   CONSTRAINT lecture_revisions_no_self_source CHECK (source_draft_id IS DISTINCT FROM id),
   CONSTRAINT lecture_revisions_snapshot_source_check CHECK (status = 'draft' OR source_draft_id IS NOT NULL),
@@ -356,6 +356,15 @@ BEGIN
 END;
 $$;
 
+-- 限定事务内删除指定的归档讲义
+CREATE FUNCTION is_archived_lecture_deletion(target_id bigint) RETURNS boolean
+LANGUAGE sql STABLE AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM lectures WHERE id = target_id AND publication_status = 'archived'
+      AND id::text = current_setting('maki.lecture_delete_id', true)
+  );
+$$;
+
 -- 仅允许草稿编辑并通过审核记录推进已提交版本
 CREATE FUNCTION guard_content_revision() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -363,7 +372,7 @@ DECLARE
   review_exists boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF OLD.status <> 'draft' THEN
+    IF OLD.status <> 'draft' AND NOT is_archived_lecture_deletion(OLD.lecture_id) THEN
       RAISE EXCEPTION '已提交版本不可删除';
     END IF;
     RETURN OLD;
@@ -436,6 +445,7 @@ LANGUAGE plpgsql AS $$
 DECLARE
   revision_id bigint;
   revision_status text;
+  owner_lecture_id bigint;
 BEGIN
   IF TG_OP = 'DELETE' THEN
     revision_id := OLD.lecture_revision_id;
@@ -450,7 +460,10 @@ BEGIN
       END IF;
     END IF;
   END IF;
-  SELECT status INTO revision_status FROM lecture_revisions WHERE id = revision_id FOR UPDATE;
+  SELECT status, lecture_id INTO revision_status, owner_lecture_id FROM lecture_revisions WHERE id = revision_id FOR UPDATE;
+  IF TG_OP = 'DELETE' AND is_archived_lecture_deletion(owner_lecture_id) THEN
+    RETURN OLD;
+  END IF;
   IF revision_status IS DISTINCT FROM 'draft' THEN
     RAISE EXCEPTION '只能修改草稿版本的目录与内容';
   END IF;
@@ -488,7 +501,14 @@ CREATE FUNCTION guard_content_review() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   revision_status text;
+  owner_lecture_id bigint;
 BEGIN
+  IF TG_OP = 'DELETE' THEN
+    SELECT lecture_id INTO owner_lecture_id FROM lecture_revisions WHERE id = OLD.lecture_revision_id;
+    IF is_archived_lecture_deletion(owner_lecture_id) THEN
+      RETURN OLD;
+    END IF;
+  END IF;
   IF TG_OP <> 'INSERT' THEN
     RAISE EXCEPTION '审核记录不可修改或删除';
   END IF;

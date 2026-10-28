@@ -93,4 +93,10 @@ export default async function lectureRoutes(app) {
     if (d.is_recommended !== undefined && typeof d.is_recommended !== 'boolean') throw badRequest('推荐标记必须为布尔值')
     return service.publication(req.user, id(req.params.id), d.publication_status, d.is_recommended)
   })
+  app.post('/lectures/:id/restore', { preHandler: [app.requireLogin] }, async req =>
+    service.restore(req.user, id(req.params.id)))
+  app.delete('/lectures/:id', { preHandler: [app.requireAdmin] }, async (req, reply) => {
+    await service.deleteArchived(req.user, id(req.params.id))
+    reply.code(204)
+  })
 }

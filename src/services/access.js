@@ -1,4 +1,8 @@
-import { forbidden, notFound, unauthorized } from '../lib/errors.js'
+import { conflict, forbidden, notFound, unauthorized } from '../lib/errors.js'
+
+export function requireUnarchived(lecture) {
+  if (lecture.publication_status === 'archived') throw conflict('已归档讲义只能恢复归档')
+}
 
 export function requireUser(user) {
   if (!user) throw unauthorized()
