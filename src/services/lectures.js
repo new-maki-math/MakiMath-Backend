@@ -31,6 +31,36 @@ export async function mine(user) {
   )).rows
 }
 
+export async function owned(user) {
+  requireUser(user)
+  const rows = (await query(
+    `SELECT l.id AS lecture_id,l.slug,l.publication_status,l.public_revision_id,
+            r.id AS revision_id,r.revision_no,r.source_draft_id,r.status,r.title,r.subtitle,r.updated_at
+       FROM lectures l LEFT JOIN lecture_revisions r ON r.lecture_id=l.id
+      WHERE l.owner_id=$1
+      ORDER BY COALESCE(MAX(r.updated_at) OVER (PARTITION BY l.id),l.updated_at) DESC,l.id DESC,
+               CASE WHEN r.status='draft' AND r.source_draft_id IS NULL THEN 0 ELSE 1 END,
+               r.revision_no DESC NULLS LAST,r.id DESC NULLS LAST`, [user.id],
+  )).rows
+  const lectures = new Map()
+  for (const row of rows) {
+    if (!lectures.has(row.lecture_id)) {
+      lectures.set(row.lecture_id, {
+        id: row.lecture_id, slug: row.slug, publication_status: row.publication_status,
+        public_revision_id: row.public_revision_id, versions: [],
+      })
+    }
+    if (row.revision_id === null) continue
+    lectures.get(row.lecture_id).versions.push({
+      revision_id: row.revision_id, revision_no: row.revision_no,
+      kind: row.status === 'draft' && row.source_draft_id === null ? 'working_draft' : 'snapshot',
+      status: row.status, title: row.title, subtitle: row.subtitle, updated_at: row.updated_at,
+      is_public: row.publication_status === 'published' && row.public_revision_id === row.revision_id && row.status === 'approved',
+    })
+  }
+  return [...lectures.values()]
+}
+
 export async function publicList() {
   return (await query(
     `SELECT l.id,l.slug,l.is_recommended,r.id AS revision_id,r.title,r.subtitle,r.descr,r.category_id

@@ -137,7 +137,8 @@
 | --- | --- | --- |
 | GET | `/lectures` | 公开讲义列表，包含推荐标记 |
 | GET | `/lectures/by-slug/:slug` | 按在线讲义 slug 读取默认内容，可选 `revision_id` 明确指定版本 |
-| GET | `/lectures/mine` | 登录用户有权访问的讲义列表 |
+| GET | `/lectures/mine` | 登录用户有权访问的讲义列表，包括协作者与管理员可见讲义 |
+| GET | `/lectures/owned` | 登录用户作为所有者的讲义及版本摘要 |
 | POST | `/lectures` | 提交 `slug`、`title`，返回 `lecture` 和首个草稿 `revision` |
 | GET | `/lectures/:id/revisions` | 读取有权访问的讲义版本列表 |
 | POST | `/lectures/:id/revisions` | 提交 `based_on_id` 复制快照；已有工作草稿时返回 409 |
@@ -148,6 +149,27 @@
 | PUT | `/lectures/:id/collaborators/:userId` | 所有者或管理员提交 `permission`，取值为 `view` 或 `edit` |
 | DELETE | `/lectures/:id/collaborators/:userId` | 所有者或管理员移除协作者 |
 | PATCH | `/lectures/:id/publication` | 所有者或管理员设置 `publication_status`，推荐标记 `is_recommended` 仅管理员可设置 |
+
+`GET /api/lectures/owned` 用于“我创作的讲义”，只返回当前会话用户作为所有者的讲义，管理员也只能通过该接口取得本人作品。未登录或会话失效返回 401，没有本人讲义返回 `200 []`。查询使用一次数据库查询，响应为数组：
+
+```json
+[
+  {
+    "id": 1,
+    "slug": "analysis",
+    "publication_status": "published",
+    "public_revision_id": 10,
+    "versions": [
+      { "revision_id": 11, "revision_no": 1, "kind": "working_draft", "status": "draft", "title": "讲义草稿", "subtitle": "", "updated_at": "2026-10-28T12:00:00.000Z", "is_public": false },
+      { "revision_id": 10, "revision_no": 2, "kind": "snapshot", "status": "approved", "title": "已发布讲义", "subtitle": "", "updated_at": "2026-10-27T12:00:00.000Z", "is_public": true }
+    ]
+  }
+]
+```
+
+版本状态为 `draft`、`pending`、`approved` 或 `rejected`。`kind` 为 `working_draft` 或 `snapshot`；仅当状态是 `draft` 且没有来源草稿时为工作草稿。历史异常数据若返回 `kind: snapshot` 且 `status: draft`，前端应标记异常，不应当成工作草稿。`is_public` 仅当讲义当前为 `published`、版本为 `approved` 且 ID 等于 `public_revision_id` 时为真；下架或归档可保留 `public_revision_id`，但所有版本的 `is_public` 均为假。
+
+讲义按最近版本的 `updated_at` 倒序，再按讲义 ID 倒序；无版本时使用讲义的 `updated_at`。同一讲义的工作草稿排在快照之前，快照按 `revision_no`、版本 ID 倒序。无版本时 `versions` 为 `[]`，不会生成草稿；下架和归档的本人讲义仍会返回。响应不含正文，设置 `Cache-Control: no-store`，第一版不分页。权限或身份变化后应重新获取列表，读取指定版本时仍进行独立授权检查。
 
 在线讲义 slug 在平台范围内唯一，前端地址使用 `/lecture/online/:slug`，通过 `GET /api/lectures/by-slug/:slug` 直接读取，不需要先下载列表。原 `GET /api/lectures/:id` 已移除，不提供兼容入口；讲义内部 ID 仍用于协作者、版本列表及其他管理接口。
 
