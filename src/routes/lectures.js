@@ -29,9 +29,11 @@ function validateTree(chapters) {
 export default async function lectureRoutes(app) {
   app.get('/lectures', async () => service.publicList())
   app.get('/lectures/mine', { preHandler: [app.requireLogin] }, async req => service.mine(req.user))
-  app.get('/lectures/:id', async (req, reply) => {
+  app.get('/lectures/by-slug/:slug', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
-    return service.publicLecture(id(req.params.id))
+    slug(req.params.slug)
+    const revisionId = req.query.revision_id === undefined ? null : id(req.query.revision_id)
+    return service.lectureBySlug(req.user, req.params.slug, revisionId)
   })
   app.post('/lectures', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['slug','title'], ['slug','title'])

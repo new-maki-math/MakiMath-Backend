@@ -136,11 +136,11 @@
 | 方法 | 路径 | 请求体或说明 |
 | --- | --- | --- |
 | GET | `/lectures` | 公开讲义列表，包含推荐标记 |
-| GET | `/lectures/:id` | 读取当前公开讲义完整版本 |
+| GET | `/lectures/by-slug/:slug` | 按在线讲义 slug 读取默认内容，可选 `revision_id` 明确指定版本 |
 | GET | `/lectures/mine` | 登录用户有权访问的讲义列表 |
 | POST | `/lectures` | 提交 `slug`、`title`，返回 `lecture` 和首个草稿 `revision` |
 | GET | `/lectures/:id/revisions` | 读取有权访问的讲义版本列表 |
-| POST | `/lectures/:id/revisions` | 提交 `based_on_id`，复制完整版本和小节源码生成草稿 |
+| POST | `/lectures/:id/revisions` | 提交 `based_on_id` 复制快照；已有工作草稿时返回 409 |
 | GET | `/lecture-revisions/:id` | 读取有权访问的完整版本 |
 | PUT | `/lecture-revisions/:id` | 以完整目录树替换草稿 |
 | POST | `/lecture-revisions/:id/submit` | 提交草稿 `edit_version`，生成独立待审快照并返回 `snapshot` 和 `draft_edit_version` |
@@ -148,6 +148,14 @@
 | PUT | `/lectures/:id/collaborators/:userId` | 所有者或管理员提交 `permission`，取值为 `view` 或 `edit` |
 | DELETE | `/lectures/:id/collaborators/:userId` | 所有者或管理员移除协作者 |
 | PATCH | `/lectures/:id/publication` | 所有者或管理员设置 `publication_status`，推荐标记 `is_recommended` 仅管理员可设置 |
+
+在线讲义 slug 在平台范围内唯一，前端地址使用 `/lecture/online/:slug`，通过 `GET /api/lectures/by-slug/:slug` 直接读取，不需要先下载列表。原 `GET /api/lectures/:id` 已移除，不提供兼容入口；讲义内部 ID 仍用于协作者、版本列表及其他管理接口。
+
+不指定 `revision_id` 时，已发布讲义始终返回当前公开的已审核快照，包括所有者和协作者访问时；其他用户不能通过默认读取得到草稿。未发布、下架或归档的讲义仅所有者、查看或编辑协作者、管理员可访问，默认读取该讲义唯一工作草稿。不存在或无权限返回 404；若历史数据没有工作草稿或存在多个工作草稿，返回 409 并在 `details` 提供 `lecture_id` 和 `drafts`，不会猜选版本。非法 slug 或版本 ID 返回 400。
+
+可使用 `GET /api/lectures/by-slug/:slug?revision_id=123` 精确读取该讲义的指定版本，响应 `revision.id` 就是所选版本，不会自动切换草稿或最新快照。匿名或无查看权限用户只能读取当前已发布的审核通过快照；所有者、查看和编辑协作者及管理员可读取该讲义的草稿、待审、通过或驳回版本。版本不存在、属于其他讲义或无权限时统一返回 404。登录用户也可继续使用 `GET /api/lecture-revisions/:id` 读取有权查看的明确版本，该接口的权限错误为 403。
+
+每个讲义最多一个工作草稿，提交审核产生独立的不可修改快照。新初始化结构包含草稿唯一约束；已有数据库需要另行审核并手工执行 `Database/manual/enforce-single-lecture-draft.sql`。脚本发现同一讲义有多个草稿时会报错回滚，不会自动删除或合并数据。若尝试从快照复制新草稿而已有工作草稿，返回 409，并在 `details.draft_id` 中给出草稿 ID。读取响应为 `{lecture, revision, chapters}`，`lecture.id` 可供管理接口使用。接口返回 `Cache-Control: no-store`，不暴露所有者身份用于授权判断。
 
 完整草稿保存示例：
 

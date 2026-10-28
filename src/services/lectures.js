@@ -39,16 +39,32 @@ export async function publicList() {
   )).rows
 }
 
-export async function publicLecture(lectureId) {
+export async function lectureBySlug(user, lectureSlug, requestedRevisionId = null) {
   return tx(async db => {
     await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     const row = (await db.query(
-      `SELECT l.id,l.slug,l.public_revision_id,l.is_recommended FROM lectures l
-       JOIN lecture_revisions r ON r.id=l.public_revision_id AND r.status='approved'
-       WHERE l.id=$1 AND l.publication_status='published'`, [lectureId],
+      'SELECT id,slug,owner_id,publication_status,public_revision_id,is_recommended FROM lectures WHERE slug=$1', [lectureSlug],
     )).rows[0]
     if (!row) throw notFound('讲义')
-    return { lecture: row, ...(await snapshot(db, row.public_revision_id)) }
+    let authorized = Boolean(user && (user.role === 'super_admin' || user.id === row.owner_id))
+    if (user && !authorized) {
+      authorized = Boolean((await db.query('SELECT 1 FROM lecture_collaborators WHERE lecture_id=$1 AND user_id=$2', [row.id,user.id])).rows[0])
+    }
+    let revisionId = requestedRevisionId
+    if (revisionId === null && row.publication_status === 'published') revisionId = row.public_revision_id
+    if (revisionId === null) {
+      if (!authorized) throw notFound('讲义')
+      const drafts = (await db.query(
+        "SELECT id,title,status,updated_at FROM lecture_revisions WHERE lecture_id=$1 AND status='draft' AND source_draft_id IS NULL ORDER BY updated_at DESC,id DESC", [row.id],
+      )).rows
+      if (drafts.length !== 1) throw conflict('请选择讲义版本', { lecture_id: row.id, drafts })
+      revisionId = drafts[0].id
+    }
+    const selected = (await db.query('SELECT id,status FROM lecture_revisions WHERE id=$1 AND lecture_id=$2', [revisionId,row.id])).rows[0]
+    const published = Boolean(selected && row.publication_status === 'published' && row.public_revision_id === selected.id && selected.status === 'approved')
+    if (!selected || (!authorized && !published)) throw notFound('讲义')
+    const lecture = { id: row.id, slug: row.slug, public_revision_id: row.public_revision_id, is_recommended: row.is_recommended }
+    return { lecture, ...(await snapshot(db, selected.id)) }
   })
 }
 
@@ -91,18 +107,20 @@ export async function copyRevision(user, lectureId, baseId) {
   requireUser(user)
   return tx(async (db) => {
     await lectureAccess(db, lectureId, user, 'edit', true)
+    const draft = (await db.query("SELECT id FROM lecture_revisions WHERE lecture_id=$1 AND status='draft' AND source_draft_id IS NULL", [lectureId])).rows[0]
+    if (draft) throw conflict('讲义已有工作草稿', { draft_id: draft.id })
     const base = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 AND lecture_id=$2 FOR UPDATE', [baseId, lectureId])).rows[0]
     if (!base) throw notFound('讲义版本')
     if (base.status === 'draft') throw conflict('只能复制已提交的版本')
     const tree = await snapshot(db, base.id)
     const n = (await db.query('SELECT COALESCE(max(revision_no),0)+1 AS n FROM lecture_revisions WHERE lecture_id=$1', [lectureId])).rows[0].n
-    const draft = (await db.query(
+    const createdDraft = (await db.query(
       `INSERT INTO lecture_revisions(lecture_id,revision_no,based_on_id,category_id,title,subtitle,descr,typst_version,metadata,created_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [lectureId,n,base.id,base.category_id,base.title,base.subtitle,base.descr,base.typst_version,base.metadata,user.id],
     )).rows[0]
-    await insertTree(db, draft.id, tree.chapters)
-    return snapshot(db, draft.id)
+    await insertTree(db, createdDraft.id, tree.chapters)
+    return snapshot(db, createdDraft.id)
   })
 }
 

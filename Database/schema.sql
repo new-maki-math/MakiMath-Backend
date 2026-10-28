@@ -223,6 +223,7 @@ CREATE INDEX lecture_revisions_category_idx ON lecture_revisions (category_id);
 CREATE INDEX lecture_revisions_created_by_idx ON lecture_revisions (created_by);
 CREATE INDEX lecture_revisions_review_idx ON lecture_revisions (status, submitted_at);
 CREATE UNIQUE INDEX lecture_revisions_one_pending_idx ON lecture_revisions (lecture_id) WHERE status = 'pending';
+CREATE UNIQUE INDEX lecture_revisions_one_working_draft_idx ON lecture_revisions (lecture_id) WHERE status = 'draft' AND source_draft_id IS NULL;
 CREATE INDEX lecture_revisions_title_trgm_idx ON lecture_revisions USING gin (title gin_trgm_ops);
 
 -- 讲义章节属于确定的讲义版本
