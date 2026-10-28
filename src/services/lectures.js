@@ -11,6 +11,14 @@ async function snapshot(db, revisionId) {
   return { revision, chapters: chapters.map(chapter => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapter.id) })) }
 }
 
+async function outlineSnapshot(db, revisionId) {
+  const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
+  if (!revision) throw notFound('讲义版本')
+  const chapters = (await db.query('SELECT * FROM lecture_chapters WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
+  const sections = (await db.query('SELECT id,lecture_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,pos,created_at,updated_at FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
+  return { revision, chapters: chapters.map(chapter => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapter.id) })) }
+}
+
 export async function create(user, data) {
   requireUser(user)
   return tx(async (db) => {
@@ -69,44 +77,74 @@ export async function publicList() {
   )).rows
 }
 
-export async function lectureBySlug(user, lectureSlug, requestedRevisionId = null) {
+async function selectLectureBySlug(db, user, lectureSlug, requestedRevisionId) {
+  const row = (await db.query(
+    'SELECT id,slug,owner_id,publication_status,public_revision_id,is_recommended FROM lectures WHERE slug=$1', [lectureSlug],
+  )).rows[0]
+  if (!row) throw notFound('讲义')
+  let authorized = Boolean(user && (user.role === 'super_admin' || user.id === row.owner_id))
+  if (user && !authorized) {
+    authorized = Boolean((await db.query('SELECT 1 FROM lecture_collaborators WHERE lecture_id=$1 AND user_id=$2', [row.id,user.id])).rows[0])
+  }
+  let revisionId = requestedRevisionId
+  if (revisionId === null && row.publication_status === 'published') revisionId = row.public_revision_id
+  if (revisionId === null) {
+    if (!authorized) throw notFound('讲义')
+    const drafts = (await db.query(
+      "SELECT id,title,status,updated_at FROM lecture_revisions WHERE lecture_id=$1 AND status='draft' AND source_draft_id IS NULL ORDER BY updated_at DESC,id DESC", [row.id],
+    )).rows
+    if (drafts.length !== 1) throw conflict('请选择讲义版本', { lecture_id: row.id, drafts })
+    revisionId = drafts[0].id
+  }
+  const selected = (await db.query('SELECT id,status FROM lecture_revisions WHERE id=$1 AND lecture_id=$2', [revisionId,row.id])).rows[0]
+  const published = Boolean(selected && row.publication_status === 'published' && row.public_revision_id === selected.id && selected.status === 'approved')
+  if (!selected || (!authorized && !published)) throw notFound('讲义')
+  const lecture = { id: row.id, slug: row.slug, public_revision_id: row.public_revision_id, is_recommended: row.is_recommended }
+  return { lecture, selected }
+}
+
+export async function lectureOutline(user, lectureSlug, revisionId = null) {
   return tx(async db => {
     await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
-    const row = (await db.query(
-      'SELECT id,slug,owner_id,publication_status,public_revision_id,is_recommended FROM lectures WHERE slug=$1', [lectureSlug],
-    )).rows[0]
-    if (!row) throw notFound('讲义')
-    let authorized = Boolean(user && (user.role === 'super_admin' || user.id === row.owner_id))
-    if (user && !authorized) {
-      authorized = Boolean((await db.query('SELECT 1 FROM lecture_collaborators WHERE lecture_id=$1 AND user_id=$2', [row.id,user.id])).rows[0])
-    }
-    let revisionId = requestedRevisionId
-    if (revisionId === null && row.publication_status === 'published') revisionId = row.public_revision_id
-    if (revisionId === null) {
-      if (!authorized) throw notFound('讲义')
-      const drafts = (await db.query(
-        "SELECT id,title,status,updated_at FROM lecture_revisions WHERE lecture_id=$1 AND status='draft' AND source_draft_id IS NULL ORDER BY updated_at DESC,id DESC", [row.id],
-      )).rows
-      if (drafts.length !== 1) throw conflict('请选择讲义版本', { lecture_id: row.id, drafts })
-      revisionId = drafts[0].id
-    }
-    const selected = (await db.query('SELECT id,status FROM lecture_revisions WHERE id=$1 AND lecture_id=$2', [revisionId,row.id])).rows[0]
-    const published = Boolean(selected && row.publication_status === 'published' && row.public_revision_id === selected.id && selected.status === 'approved')
-    if (!selected || (!authorized && !published)) throw notFound('讲义')
-    const lecture = { id: row.id, slug: row.slug, public_revision_id: row.public_revision_id, is_recommended: row.is_recommended }
-    return { lecture, ...(await snapshot(db, selected.id)) }
+    const { lecture, selected } = await selectLectureBySlug(db, user, lectureSlug, revisionId)
+    return { lecture, ...(await outlineSnapshot(db, selected.id)) }
   })
 }
 
-export async function revision(user, revisionId) {
+export async function lectureSection(user, lectureSlug, revisionId, chapterSlug, sectionSlug, editVersion) {
+  return tx(async db => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const { selected } = await selectLectureBySlug(db, user, lectureSlug, revisionId)
+    const revision = (await db.query('SELECT edit_version FROM lecture_revisions WHERE id=$1', [selected.id])).rows[0]
+    if (revision.edit_version !== editVersion) throw conflict('讲义内容已修改请重新加载目录')
+    const section = (await db.query(
+      `SELECT s.occurrence_id,s.source FROM lecture_sections s
+       JOIN lecture_chapters c ON c.id=s.chapter_id AND c.lecture_revision_id=s.lecture_revision_id
+       WHERE s.lecture_revision_id=$1 AND c.slug=$2 AND s.slug=$3`, [selected.id,chapterSlug,sectionSlug],
+    )).rows[0]
+    if (!section) throw notFound('讲义小节')
+    return { revision_id: selected.id, edit_version: revision.edit_version, ...section }
+  })
+}
+
+export async function saveSection(user, revisionId, occurrenceId, data) {
   requireUser(user)
-  return tx(async (db) => {
-    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
-    const row = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
-    if (!row) throw notFound('讲义版本')
-    await lectureAccess(db, row.lecture_id, user)
-    await db.query('SELECT id FROM lecture_revisions WHERE id=$1 FOR SHARE', [revisionId])
-    return snapshot(db, revisionId)
+  return tx(async db => {
+    const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
+    if (!initial) throw notFound('讲义版本')
+    const lecture = await lectureAccess(db, initial.lecture_id, user, 'edit', true)
+    requireUnarchived(lecture)
+    const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
+    if (revision.status !== 'draft' || revision.source_draft_id !== null) throw conflict('只有工作草稿可以编辑')
+    if (revision.edit_version !== data.edit_version) throw conflict('草稿已被修改请重新加载')
+    const section = (await db.query(
+      `UPDATE lecture_sections SET slug=$1,tag=$2,title=$3,summary=$4,source=$5
+       WHERE lecture_revision_id=$6 AND occurrence_id=$7 RETURNING *`,
+      [data.slug,data.tag,data.title,data.summary,data.source,revisionId,occurrenceId],
+    )).rows[0]
+    if (!section) throw notFound('讲义小节')
+    const updated = (await db.query('UPDATE lecture_revisions SET edit_version=edit_version+1 WHERE id=$1 RETURNING edit_version', [revisionId])).rows[0]
+    return { section, edit_version: updated.edit_version }
   })
 }
 
@@ -199,7 +237,7 @@ export async function copyRevision(user, lectureId, baseId) {
       [lectureId,n,base.id,base.category_id,base.title,base.subtitle,base.descr,base.typst_version,base.metadata,user.id],
     )).rows[0]
     await insertTree(db, createdDraft.id, tree.chapters)
-    return snapshot(db, createdDraft.id)
+    return outlineSnapshot(db, createdDraft.id)
   })
 }
 
@@ -213,6 +251,15 @@ export async function save(user, revisionId, data) {
     const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (revision.status !== 'draft') throw conflict('只有草稿可以编辑')
     if (revision.edit_version !== data.edit_version) throw conflict('草稿已被修改请重新加载')
+    const oldSources = new Map((await db.query('SELECT occurrence_id,source FROM lecture_sections WHERE lecture_revision_id=$1', [revisionId])).rows.map(section => [section.occurrence_id,section.source]))
+    for (const chapter of data.chapters) {
+      for (const section of chapter.sections) {
+        if (section.source === undefined) {
+          if (!oldSources.has(section.occurrence_id)) throw conflict('小节不存在请重新加载')
+          section.source = oldSources.get(section.occurrence_id)
+        }
+      }
+    }
     await db.query('DELETE FROM lecture_sections WHERE lecture_revision_id=$1', [revisionId])
     await db.query('DELETE FROM lecture_chapters WHERE lecture_revision_id=$1', [revisionId])
     await db.query(
@@ -221,7 +268,7 @@ export async function save(user, revisionId, data) {
       [data.title,data.subtitle,data.descr,data.category_id,data.typst_version,data.metadata,data.change_note,revisionId],
     )
     await insertTree(db, revisionId, data.chapters)
-    return snapshot(db, revisionId)
+    return outlineSnapshot(db, revisionId)
   })
 }
 

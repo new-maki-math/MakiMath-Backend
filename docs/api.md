@@ -141,16 +141,17 @@
 | 方法 | 路径 | 请求体或说明 |
 | --- | --- | --- |
 | GET | `/lectures` | 公开讲义列表，包含推荐标记 |
-| GET | `/lectures/by-slug/:slug` | 按在线讲义 slug 读取默认内容，可选 `revision_id` 明确指定版本 |
+| GET | `/lectures/by-slug/:slug/outline` | 读取讲义元信息和不含正文的完整目录，可选 `revision_id` |
+| GET | `/lectures/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug` | 按版本及章节小节标识读取正文，必须提供 `edit_version` |
 | GET | `/lectures/mine` | 登录用户有权访问的讲义列表，包括协作者与管理员可见讲义 |
 | GET | `/lectures/owned` | 登录用户作为所有者的讲义及版本摘要 |
 | POST | `/lectures` | 提交 `slug`、`title`，返回 `lecture` 和首个草稿 `revision` |
 | POST | `/lectures/import` | 导入可移植讲义 JSON，事务创建讲义及工作草稿 |
 | GET | `/lectures/:id/revisions` | 读取有权访问的讲义版本列表 |
 | POST | `/lectures/:id/revisions` | 提交 `based_on_id` 复制快照；已有工作草稿时返回 409 |
-| GET | `/lecture-revisions/:id` | 读取有权访问的完整版本 |
 | GET | `/lecture-revisions/:id/export` | 导出指定版本的完整可移植讲义 JSON |
 | PUT | `/lecture-revisions/:id` | 以完整目录树替换草稿 |
+| PUT | `/lecture-revisions/:id/sections/:occurrenceId` | 单独保存工作草稿中的一个小节 |
 | POST | `/lecture-revisions/:id/submit` | 提交草稿 `edit_version`，生成独立待审快照并返回 `snapshot` 和 `draft_edit_version` |
 | GET | `/lectures/:id/collaborators` | 有权查看讲义的用户读取协作者 |
 | PUT | `/lectures/:id/collaborators/:userId` | 所有者或管理员提交 `permission`，取值为 `view` 或 `edit` |
@@ -221,11 +222,17 @@
 
 讲义按最近版本的 `updated_at` 倒序，再按讲义 ID 倒序；无版本时使用讲义的 `updated_at`。同一讲义的工作草稿排在快照之前，快照按 `revision_no`、版本 ID 倒序。无版本时 `versions` 为 `[]`，不会生成草稿；下架和归档的本人讲义仍会返回。响应不含正文，设置 `Cache-Control: no-store`，第一版不分页。权限或身份变化后应重新获取列表，读取指定版本时仍进行独立授权检查。
 
-在线讲义 slug 在平台范围内唯一，前端地址使用 `/lecture/online/:slug`，通过 `GET /api/lectures/by-slug/:slug` 直接读取，不需要先下载列表。原 `GET /api/lectures/:id` 已移除，不提供兼容入口；讲义内部 ID 仍用于协作者、版本列表及其他管理接口。
+在线讲义 slug 在平台范围内唯一，前端地址使用 `/lecture/online/:slug`，通过轻量目录接口读取目录。讲义内部 ID 仍用于协作者、版本列表及其他管理接口。
+
+轻量目录 `GET /api/lectures/by-slug/:slug/outline` 返回 `{ lecture, revision, chapters }`。章节和小节包含原有标识、`occurrence_id`、标题、摘要及顺序等字段，但每个小节不包含 `source`。响应中的 `revision.id` 和 `revision.edit_version` 用于随后读取正文；前端必须使用这两个实际返回值，不能根据最新公开版本自行推断。
+
+单小节保存使用 `PUT /api/lecture-revisions/:id/sections/:occurrenceId`，请求体包含 `edit_version`、`slug`、`tag`、`title`、`summary` 和 `source`。成功返回 `{ "section": { ... }, "edit_version": 2 }`，只更新指定小节并递增草稿版本；仅拥有编辑权限的用户可编辑未归档讲义的工作草稿。版本冲突、非草稿或已归档返回 409，小节不存在返回 404；用户名和权限来自登录会话。新建或移动目录仍需先保存目录。
+
+正文通过 `GET /api/lectures/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug?edit_version=1` 读取，返回 `{ "revision_id": 12, "edit_version": 1, "occurrence_id": "00000000-0000-0000-0000-000000000001", "source": "正文" }`。章节标识在版本内唯一，小节标识只在所属章节内唯一；路径参数应分别进行 URL 编码。`edit_version` 必须取自同一目录响应。草稿在读取目录后发生保存时，正文返回 409，前端应重新获取目录；目录和正文分别在数据库一致性快照中读取。讲义、版本或小节不存在以及无权查看时返回 404；参数不合法返回 400。匿名用户只能读取当前公开的已审核版本，公开版本改变后旧版本不再允许匿名读取。两接口都使用既有通信加密，响应设置 `Cache-Control: no-store`。
 
 不指定 `revision_id` 时，已发布讲义始终返回当前公开的已审核快照，包括所有者和协作者访问时；其他用户不能通过默认读取得到草稿。未发布、下架或归档的讲义仅所有者、查看或编辑协作者、管理员可访问，默认读取该讲义唯一工作草稿。不存在或无权限返回 404；若历史数据没有工作草稿或存在多个工作草稿，返回 409 并在 `details` 提供 `lecture_id` 和 `drafts`，不会猜选版本。非法 slug 或版本 ID 返回 400。
 
-可使用 `GET /api/lectures/by-slug/:slug?revision_id=123` 精确读取该讲义的指定版本，响应 `revision.id` 就是所选版本，不会自动切换草稿或最新快照。匿名或无查看权限用户只能读取当前已发布的审核通过快照；所有者、查看和编辑协作者及管理员可读取该讲义的草稿、待审、通过或驳回版本。版本不存在、属于其他讲义或无权限时统一返回 404。登录用户也可继续使用 `GET /api/lecture-revisions/:id` 读取有权查看的明确版本，该接口的权限错误为 403。
+可使用 `GET /api/lectures/by-slug/:slug/outline?revision_id=123` 精确读取该讲义的指定版本目录。匿名或无查看权限用户只能读取当前已发布的审核通过快照；所有者、查看和编辑协作者及管理员可读取该讲义的草稿、待审、通过或驳回版本。版本不存在、属于其他讲义或无权限时统一返回 404。
 
 每个讲义最多一个工作草稿，提交审核产生独立的不可修改快照。新初始化结构包含草稿唯一约束；已有数据库需要另行审核并手工执行 `Database/manual/enforce-single-lecture-draft.sql`。脚本发现同一讲义有多个草稿时会报错回滚，不会自动删除或合并数据。若尝试从快照复制新草稿而已有工作草稿，返回 409，并在 `details.draft_id` 中给出草稿 ID。读取响应为 `{lecture, revision, chapters}`，`lecture.id` 可供管理接口使用。接口返回 `Cache-Control: no-store`，不暴露所有者身份用于授权判断。
 
@@ -257,7 +264,7 @@
 }
 ```
 
-保存体中的每个小节只包含完整的 `source`，后端按普通文本原样保存，不解析、改写或校验其中的知识点引用。章节和小节自身的 `occurrence_id` 仍应在后续保存时保留。
+目录保存必须保留已有章节和小节的 `occurrence_id`。已有小节可省略 `source`，服务端在同一事务中保留数据库里的原正文；新小节必须提供 `source`。若提供正文，后端按普通文本原样保存，不解析、改写或校验其中的知识点引用。目录保存响应只包含元信息和目录，不包含小节正文；`edit_version` 冲突会拒绝整次保存。
 
 前端展示时识别源码中的 `#mm-knowledge(slug: "sequence-limit")`，通过 `GET /api/knowledge-points/by-slug/sequence-limit` 读取当前有效知识点，并以响应中的永久 `id` 关联掌握状态。知识点不存在或归档时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前内容。
 

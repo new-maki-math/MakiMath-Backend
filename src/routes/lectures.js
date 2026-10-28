@@ -16,10 +16,11 @@ function validateTree(chapters) {
     string(chapter.slug, 100)
     for (const field of ['tag','title','summary']) if (chapter[field] !== undefined) string(chapter[field], 5000, true)
     for (const section of list(chapter.sections, 200)) {
-      body(section, ['occurrence_id','slug','tag','title','summary','source'], ['slug','source'])
+      body(section, ['occurrence_id','slug','tag','title','summary','source'], ['slug'])
       occurrence(section.occurrence_id)
       string(section.slug, 100)
-      string(section.source, 200000, true)
+      if (section.source !== undefined) string(section.source, 200000, true)
+      else if (!section.occurrence_id) throw badRequest('新小节必须提供源码')
       for (const field of ['tag','title','summary']) if (section[field] !== undefined) string(section[field], 5000, true)
       if (++count > 2000) throw badRequest('讲义小节数量超出限制')
     }
@@ -65,11 +66,18 @@ export default async function lectureRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     return service.owned(req.user)
   })
-  app.get('/lectures/by-slug/:slug', async (req, reply) => {
+  app.get('/lectures/by-slug/:slug/outline', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     slug(req.params.slug)
     const revisionId = req.query.revision_id === undefined ? null : id(req.query.revision_id)
-    return service.lectureBySlug(req.user, req.params.slug, revisionId)
+    return service.lectureOutline(req.user, req.params.slug, revisionId)
+  })
+  app.get('/lectures/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    slug(req.params.slug)
+    string(req.params.chapterSlug, 100)
+    string(req.params.sectionSlug, 100)
+    return service.lectureSection(req.user, req.params.slug, id(req.params.revisionId), req.params.chapterSlug, req.params.sectionSlug, id(req.query.edit_version))
   })
   app.post('/lectures', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['slug','title'], ['slug','title'])
@@ -92,13 +100,19 @@ export default async function lectureRoutes(app) {
     reply.code(201)
     return result
   })
-  app.get('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
-    reply.header('Cache-Control', 'no-store')
-    return service.revision(req.user, id(req.params.id))
-  })
   app.get('/lecture-revisions/:id/export', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.exportRevision(req.user, id(req.params.id))
+  })
+  app.put('/lecture-revisions/:id/sections/:occurrenceId', { preHandler: [app.requireLogin] }, async req => {
+    occurrence(req.params.occurrenceId)
+    const fields = ['edit_version','slug','tag','title','summary','source']
+    const d = body(req.body, fields, fields)
+    integer(d.edit_version, 1)
+    string(d.slug, 100)
+    for (const field of ['tag','title','summary']) string(d[field], 5000, true)
+    string(d.source, 200000, true)
+    return service.saveSection(req.user, id(req.params.id), req.params.occurrenceId, d)
   })
   app.put('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
     const fields = ['edit_version','title','subtitle','descr','category_id','typst_version','metadata','change_note','chapters']
