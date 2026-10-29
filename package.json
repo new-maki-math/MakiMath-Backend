@@ -1,6 +1,6 @@
 {
   "name": "maki-math-backend",
-  "version": "0.1.0",
+  "version": "1.1.0-beta",
   "private": true,
   "description": "MakiMath 知识点与讲义服务",
   "type": "module",
