@@ -226,6 +226,13 @@ CREATE UNIQUE INDEX lecture_revisions_one_pending_idx ON lecture_revisions (lect
 CREATE UNIQUE INDEX lecture_revisions_one_working_draft_idx ON lecture_revisions (lecture_id) WHERE status = 'draft' AND source_draft_id IS NULL;
 CREATE INDEX lecture_revisions_title_trgm_idx ON lecture_revisions USING gin (title gin_trgm_ops);
 
+-- 讲义版本封面独立存储
+CREATE TABLE lecture_revision_covers (
+  lecture_revision_id bigint PRIMARY KEY REFERENCES lecture_revisions(id) ON DELETE RESTRICT,
+  mime text NOT NULL CHECK (mime IN ('image/png', 'image/jpeg', 'image/webp')),
+  data bytea NOT NULL CHECK (octet_length(data) BETWEEN 1 AND 524288)
+);
+
 -- 讲义章节属于确定的讲义版本
 CREATE TABLE lecture_chapters (
   id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 版本内章节标识
@@ -583,6 +590,32 @@ CREATE TRIGGER lecture_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON lectu
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
 CREATE TRIGGER lecture_sections_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_sections
   FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
+
+-- 仅允许修改草稿封面或删除指定归档讲义
+CREATE FUNCTION guard_lecture_cover() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  revision_id bigint;
+  revision_status text;
+  owner_id bigint;
+BEGIN
+  IF TG_OP = 'DELETE' THEN revision_id := OLD.lecture_revision_id;
+  ELSE
+    revision_id := NEW.lecture_revision_id;
+    IF TG_OP = 'UPDATE' AND NEW.lecture_revision_id IS DISTINCT FROM OLD.lecture_revision_id THEN
+      RAISE EXCEPTION '封面版本归属不可修改';
+    END IF;
+  END IF;
+  SELECT status, lecture_id INTO revision_status, owner_id FROM lecture_revisions WHERE id = revision_id FOR UPDATE;
+  IF TG_OP = 'DELETE' AND is_archived_lecture_deletion(owner_id) THEN RETURN OLD; END IF;
+  IF revision_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION '只能修改草稿封面'; END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER lecture_revision_covers_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_revision_covers
+  FOR EACH ROW EXECUTE FUNCTION guard_lecture_cover();
 
 CREATE TRIGGER knowledge_points_guard BEFORE UPDATE ON knowledge_points
   FOR EACH ROW EXECUTE FUNCTION guard_knowledge_point();

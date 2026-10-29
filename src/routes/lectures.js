@@ -1,6 +1,7 @@
 import * as service from '../services/lectures.js'
 import { badRequest } from '../lib/errors.js'
 import { body, id, integer, string, slug, object, list, choice } from '../lib/validate.js'
+import { parseCover } from '../lib/lecture-cover.js'
 
 function occurrence(value) {
   if (value !== undefined && (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))) {
@@ -62,6 +63,10 @@ function validateImport(data) {
 export default async function lectureRoutes(app) {
   app.get('/lectures', async () => service.publicList())
   app.get('/lectures/mine', { preHandler: [app.requireLogin] }, async req => service.mine(req.user))
+  app.get('/lectures/manage', { preHandler: [app.requireAdmin] }, async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.manage(req.user)
+  })
   app.get('/lectures/owned', { preHandler: [app.requireLogin] }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.owned(req.user)
@@ -104,6 +109,16 @@ export default async function lectureRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     return service.exportRevision(req.user, id(req.params.id))
   })
+  app.get('/lecture-revisions/:id/cover', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    return service.getCover(req.user, id(req.params.id))
+  })
+  app.put('/lecture-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req => {
+    const d = body(req.body, ['edit_version','cover'], ['edit_version','cover'])
+    return service.setCover(req.user, id(req.params.id), integer(d.edit_version, 1), parseCover(d.cover))
+  })
+  app.delete('/lecture-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req =>
+    service.setCover(req.user, id(req.params.id), id(req.query.edit_version), null))
   app.put('/lecture-revisions/:id/sections/:occurrenceId', { preHandler: [app.requireLogin] }, async req => {
     occurrence(req.params.occurrenceId)
     const fields = ['edit_version','slug','tag','title','summary','source']

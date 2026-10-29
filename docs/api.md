@@ -61,7 +61,7 @@
 
 内容编辑请求只需要 `title` 与 `source`。标题和正文不能为空，维护人从登录身份取得。内容更新采用最后一次成功写入的结果，当前没有并发冲突提示。归档后公开详情返回 404，管理员仍可通过管理接口查看并恢复。分类和前置关系由管理员维护，前置关系替换在事务中锁定所属知识点，数据库拒绝循环依赖。
 
-`GET /api/knowledge-points/by-slug/sequence-limit` 允许匿名访问，返回与按 ID 详情相同的 `{ "id": 101, "slug": "sequence-limit", "title": "数列极限", "source": "正文", "categories": [{ "id": 1, "slug": "analysis", "name": "分析" }] }`，分类仅包含有效分类。`id` 是用于掌握状态的永久身份；slug 不合法返回 400，知识点不存在或已归档返回 404。该公开接口即使由管理员调用也不返回已归档知识点；管理详情仍按原有管理员权限通过 ID 读取。响应设置 `Cache-Control: no-store`。
+`GET /api/knowledge-points/by-slug/sequence-limit` 允许匿名访问，返回与按 ID 详情相同的 `{ "id": 101, "slug": "sequence-limit", "title": "数列极限", "source": "正文", "categories": [{ "id": 1, "slug": "analysis", "name": "分析" }] }`，分类仅包含有效分类。浏览器按 `slug` 保存掌握状态；slug 不合法返回 400，知识点不存在或已归档返回 404。该公开接口即使由管理员调用也不返回已归档知识点；管理详情仍按原有管理员权限通过 ID 读取。响应设置 `Cache-Control: no-store`。
 
 知识点 slug 在数据库中全局唯一，当前业务接口不支持修改，但数据库本身未禁止直接修改。若直接改动 slug，旧讲义引用不会随之更新；删除知识点后旧 slug 也可能重新被使用，旧引用可能指向新知识点。维护时应避免改动或复用已引用的 slug。
 
@@ -144,12 +144,16 @@
 | GET | `/lectures/by-slug/:slug/outline` | 读取讲义元信息和不含正文的完整目录，可选 `revision_id` |
 | GET | `/lectures/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug` | 按版本及章节小节标识读取正文，必须提供 `edit_version` |
 | GET | `/lectures/mine` | 登录用户有权访问的讲义列表，包括协作者与管理员可见讲义 |
+| GET | `/lectures/manage` | 管理员读取全部讲义的所有者和最新版本摘要 |
 | GET | `/lectures/owned` | 登录用户作为所有者的讲义及版本摘要 |
 | POST | `/lectures` | 提交 `slug`、`title`，返回 `lecture` 和首个草稿 `revision` |
 | POST | `/lectures/import` | 导入可移植讲义 JSON，事务创建讲义及工作草稿 |
 | GET | `/lectures/:id/revisions` | 读取有权访问的讲义版本列表 |
 | POST | `/lectures/:id/revisions` | 提交 `based_on_id` 复制快照；已有工作草稿时返回 409 |
 | GET | `/lecture-revisions/:id/export` | 导出指定版本的完整可移植讲义 JSON |
+| GET | `/lecture-revisions/:id/cover` | 读取指定版本封面 |
+| PUT | `/lecture-revisions/:id/cover` | 保存工作草稿封面 |
+| DELETE | `/lecture-revisions/:id/cover` | 删除工作草稿封面 |
 | PUT | `/lecture-revisions/:id` | 以完整目录树替换草稿 |
 | PUT | `/lecture-revisions/:id/sections/:occurrenceId` | 单独保存工作草稿中的一个小节 |
 | POST | `/lecture-revisions/:id/submit` | 提交草稿 `edit_version`，生成独立待审快照并返回 `snapshot` 和 `draft_edit_version` |
@@ -160,15 +164,35 @@
 | POST | `/lectures/:id/restore` | 所有者或管理员恢复已归档讲义，无需请求体 |
 | DELETE | `/lectures/:id` | 仅管理员永久删除已归档讲义，无需请求体，成功返回 204 |
 
+`GET /api/lectures/manage` 仅允许管理员访问，返回所有状态的讲义，不包含正文、协作者或完整用户资料；未登录返回 401，非管理员返回 403。无结果返回 `[]`，按讲义 ID 升序排列，响应为 `Cache-Control: no-store`，目前不分页。示例：
+
+```json
+[{ "id": 1, "slug": "analysis", "owner_id": 7, "owner_username": "editor", "publication_status": "published", "public_revision_id": 12, "latest_revision": { "revision_id": 13, "revision_no": 3, "status": "pending", "kind": "snapshot", "title": "分析讲义" } }]
+```
+
+`latest_revision` 按讲义内 `revision_no` 最大值选取，不按更新时间判断；无版本时为 `null`。只有 `status` 为 `draft` 且没有来源草稿的版本才标记为 `working_draft`，其余为 `snapshot`。最新版本不一定是公开版本。`GET /api/lectures/mine` 保留现有可访问范围；管理员的“我创作的讲义”应按 `owner_id` 等于当前用户 ID 筛选，也可使用只返回本人作品的 `/api/lectures/owned`。
+
 归档后整本讲义只读，包括工作草稿和审核快照。保存目录与源码、复制草稿、提交审核、调整协作者、修改发布或推荐状态，以及对已有待审快照作出审核结论，均返回 409，提示 `已归档讲义只能恢复归档`。已有待审快照和审核记录保留，恢复后可以继续审核。读取仍按原有权限执行，归档讲义不会出现在公开列表中。
 
 前端应移除归档讲义的编辑、提交、上架、下载和其他操作入口，只提供固定的恢复入口及只读查看。恢复通过 `POST /api/lectures/:id/restore`，返回更新后的讲义对象；未登录返回 401，无所有者或管理员权限返回 403，讲义不存在返回 404，未归档返回 409。恢复会保留 `public_revision_id`：已有公开版本指针时状态为 `withdrawn`，否则为 `unpublished`；`is_recommended` 为 `false`，不会自动公开。恢复后原有审核快照仍不可编辑。并发归档或恢复可能导致操作返回 409，前端应刷新讲义状态。
 
 管理员可对已归档讲义调用 `DELETE /api/lectures/:id`，前端须先完成三步确认并明确告知删除不可恢复。永久删除包括讲义、所有草稿、审核快照、章节、小节、审核记录和协作者关系；用户、分类及共享知识点不受影响。成功返回 204 且无响应体；未登录返回 401，非管理员返回 403，讲义不存在返回 404，讲义未归档返回 409。删除与恢复及其他写操作通过讲义行锁串行化，前端遇到 409 或 404 时应刷新列表。普通操作审计日志按既有机制保留。
 
-已有数据库需由用户另行审核并手工执行 `Database/manual/allow-archived-lecture-deletion.sql`，初始化数据库使用更新后的 `Database/schema.sql`。脚本只调整约束和触发函数，不清理数据。删除权限由服务端认证与授权检查执行，数据库中的事务局部标记用于限定冻结保护的删除例外，不能代替数据库账号权限管理。
+已有数据库的归档删除约束需单独核对和同步，初始化数据库使用 `Database/schema.sql`。删除权限由服务端认证与授权检查执行，数据库中的事务局部标记用于限定冻结保护的删除例外，不能代替数据库账号权限管理。
 
 归档讲义的导出接口会拒绝下载。授权阅读接口仍返回小节源码，前端应禁止对归档讲义提供下载功能，但无法阻止已获授权的读者复制阅读内容。
+
+### 讲义版本封面
+
+`GET /api/lecture-revisions/:id/cover` 按版本读取封面，成功返回 `{ "revision_id": 12, "cover": "data:image/png;base64,..." }`。匿名用户只能读取当前公开的已审核版本；所有者、协作者和管理员可读取有权查看的版本，包括归档讲义的只读版本。无封面或无权查看返回 404。响应采用既有加密并设置 `Cache-Control: no-store`。
+
+`PUT /api/lecture-revisions/:id/cover` 的加密请求体为 `{ "edit_version": 1, "cover": "data:image/png;base64,..." }`；仅所有者、编辑协作者或管理员可修改未归档讲义的工作草稿。支持 PNG、JPEG、WebP，校验 Base64、文件头与声明类型，原始文件最多 512 KiB。成功返回 `{ "revision_id": 12, "edit_version": 2, "has_cover": true }`。`DELETE /api/lecture-revisions/:id/cover?edit_version=1` 使用相同权限与并发检查，成功返回相同结构且 `has_cover` 为 `false`。版本过期、非草稿或归档返回 409；缺少权限返回 403，非法图片返回 400。成功修改递增草稿 `edit_version`。
+
+公开列表条目的 `revision_id` 和本人列表的各版本 `revision_id` 搭配 `has_cover` 用于按需读取。目录的 `revision.has_cover` 也可用于当前版本；不要将封面放入普通草稿保存请求的 `metadata`，该请求不会修改封面。提交快照和复制版本会复制对应封面，删除讲义时封面随版本删除。
+
+已有 `metadata.cover` 保持原样，不做数据库批量迁移；若没有新封面，读取与导出回退到旧值。旧值为非字符串时封面读取返回 409，导出保留原始数据，避免静默丢失。替换或删除草稿封面时移除该草稿的旧值，历史快照不变。可移植 JSON 沿用 `metadata.cover`；导入的非空封面须满足上述类型和大小校验，否则整个导入失败，空字符串表示无封面。包含封面的加密导入总请求仍受 4 MiB 限制，超限失败不产生部分讲义。
+
+已有数据库的封面表和保护触发器需单独核对和同步，初始化数据库使用 `Database/schema.sql`。本改动不自动执行 SQL。
 
 ### 讲义 JSON 导入与导出
 
@@ -211,8 +235,8 @@
     "publication_status": "published",
     "public_revision_id": 10,
     "versions": [
-      { "revision_id": 11, "revision_no": 1, "kind": "working_draft", "status": "draft", "title": "讲义草稿", "subtitle": "", "updated_at": "2026-10-28T12:00:00.000Z", "is_public": false },
-      { "revision_id": 10, "revision_no": 2, "kind": "snapshot", "status": "approved", "title": "已发布讲义", "subtitle": "", "updated_at": "2026-10-27T12:00:00.000Z", "is_public": true }
+      { "revision_id": 11, "revision_no": 1, "kind": "working_draft", "status": "draft", "title": "讲义草稿", "subtitle": "", "descr": "草稿简介", "has_cover": true, "updated_at": "2026-10-28T12:00:00.000Z", "is_public": false },
+      { "revision_id": 10, "revision_no": 2, "kind": "snapshot", "status": "approved", "title": "已发布讲义", "subtitle": "", "descr": "已发布简介", "has_cover": false, "updated_at": "2026-10-27T12:00:00.000Z", "is_public": true }
     ]
   }
 ]
@@ -234,7 +258,7 @@
 
 可使用 `GET /api/lectures/by-slug/:slug/outline?revision_id=123` 精确读取该讲义的指定版本目录。匿名或无查看权限用户只能读取当前已发布的审核通过快照；所有者、查看和编辑协作者及管理员可读取该讲义的草稿、待审、通过或驳回版本。版本不存在、属于其他讲义或无权限时统一返回 404。
 
-每个讲义最多一个工作草稿，提交审核产生独立的不可修改快照。新初始化结构包含草稿唯一约束；已有数据库需要另行审核并手工执行 `Database/manual/enforce-single-lecture-draft.sql`。脚本发现同一讲义有多个草稿时会报错回滚，不会自动删除或合并数据。若尝试从快照复制新草稿而已有工作草稿，返回 409，并在 `details.draft_id` 中给出草稿 ID。读取响应为 `{lecture, revision, chapters}`，`lecture.id` 可供管理接口使用。接口返回 `Cache-Control: no-store`，不暴露所有者身份用于授权判断。
+每个讲义最多一个工作草稿，提交审核产生独立的不可修改快照。初始化结构包含草稿唯一约束；已有数据库需单独核对该约束，不能自动删除或合并数据。若尝试从快照复制新草稿而已有工作草稿，返回 409，并在 `details.draft_id` 中给出草稿 ID。读取响应为 `{lecture, revision, chapters}`，`lecture.id` 可供管理接口使用。接口返回 `Cache-Control: no-store`，不暴露所有者身份用于授权判断。
 
 完整草稿保存示例：
 
@@ -266,7 +290,7 @@
 
 目录保存必须保留已有章节和小节的 `occurrence_id`。已有小节可省略 `source`，服务端在同一事务中保留数据库里的原正文；新小节必须提供 `source`。若提供正文，后端按普通文本原样保存，不解析、改写或校验其中的知识点引用。目录保存响应只包含元信息和目录，不包含小节正文；`edit_version` 冲突会拒绝整次保存。
 
-前端展示时识别源码中的 `#mm-knowledge(slug: "sequence-limit")`，通过 `GET /api/knowledge-points/by-slug/sequence-limit` 读取当前有效知识点，并以响应中的永久 `id` 关联掌握状态。知识点不存在或归档时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前内容。
+前端展示时识别源码中的 `#mm-knowledge(slug: "sequence-limit")`，通过 `GET /api/knowledge-points/by-slug/sequence-limit` 读取当前有效知识点，并以 `slug` 关联掌握状态。知识点不存在或归档时，详情接口返回 404，前端在该引用位置显示缺失占位并继续展示其他内容。其他请求失败应显示可重试的读取错误，不得默认为知识点不存在。知识点详情和公开讲义详情均返回 `Cache-Control: no-store`；再次读取可获取当前内容。
 
 后端不会为引用生成实例标识，不返回引用 `references` 或引用 `warnings`，也不限制重复引用、复制和剪切。保存及审核流程不检查引用目标是否存在或公开；引用格式问题不妨碍源码保存。前端只需在渲染讲义时处理能识别的引用，首阶段不递归展开知识点正文中的引用。已存源码中的旧注释也不会被后端自动删除。
 
@@ -282,6 +306,8 @@
 | POST | `/reviews/:kind/:id` | 管理员提交 `decision` 和 `comment` |
 
 `kind` 仅支持 `lecture`；`decision` 为 `approved` 或 `rejected`。审核记录与状态转换在同一事务完成。通过讲义审核会发布该完整讲义版本。推荐标记独立管理，不因审核通过自动开启。
+
+待审列表仅管理员可读取，返回版本字段及所属讲义的 `lecture_slug`。每项的 `id` 是待审版本 ID，`lecture_id` 是讲义 ID，`lecture_slug` 用于构造讲义地址；例如 `{ "id": 12, "lecture_id": 1, "lecture_slug": "analysis", "title": "分析讲义", "status": "pending" }`。可跳转到 `/lecture/online/analysis?revision_id=12` 查看指定版本目录，并通过按小节读取接口查看正文。列表包含已归档讲义的待审版本，但归档期间通过或驳回均返回 409，恢复后可继续审核。未登录返回 401，非管理员返回 403。
 
 审核通过时会检查草稿所基于的最近一个已审核版本是否仍是当前公开版本。若公开版本已变化，接口返回 409，作者应基于当前公开版本重新整理并提交。驳回不会改变当前公开版本。当前实现允许管理员审核自己的提交，是否禁止自审需要产品确认。
 

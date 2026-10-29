@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { query, tx } from '../db/pool.js'
 import { conflict, forbidden, notFound } from '../lib/errors.js'
 import { requireUser, requireAdmin, lectureAccess, requireUnarchived } from './access.js'
+import { parseCover, coverDataUrl } from '../lib/lecture-cover.js'
 
 async function snapshot(db, revisionId) {
   const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
@@ -12,7 +13,7 @@ async function snapshot(db, revisionId) {
 }
 
 async function outlineSnapshot(db, revisionId) {
-  const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
+  const revision = (await db.query("SELECT r.*,r.metadata - 'cover' AS metadata,(EXISTS (SELECT 1 FROM lecture_revision_covers c WHERE c.lecture_revision_id=r.id) OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover FROM lecture_revisions r WHERE r.id=$1", [revisionId])).rows[0]
   if (!revision) throw notFound('讲义版本')
   const chapters = (await db.query('SELECT * FROM lecture_chapters WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
   const sections = (await db.query('SELECT id,lecture_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,pos,created_at,updated_at FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
@@ -39,11 +40,34 @@ export async function mine(user) {
   )).rows
 }
 
+export async function manage(user) {
+  requireAdmin(user)
+  const rows = (await query(
+    `SELECT l.id,l.slug,l.owner_id,u.username AS owner_username,l.publication_status,l.public_revision_id,
+            r.id AS revision_id,r.revision_no,r.status AS revision_status,r.source_draft_id,r.title AS revision_title
+       FROM lectures l JOIN users u ON u.id=l.owner_id
+       LEFT JOIN LATERAL (
+         SELECT id,revision_no,status,source_draft_id,title FROM lecture_revisions
+          WHERE lecture_id=l.id ORDER BY revision_no DESC LIMIT 1
+       ) r ON true ORDER BY l.id`,
+  )).rows
+  return rows.map(row => ({
+    id: row.id, slug: row.slug, owner_id: row.owner_id, owner_username: row.owner_username,
+    publication_status: row.publication_status, public_revision_id: row.public_revision_id,
+    latest_revision: row.revision_id === null ? null : {
+      revision_id: row.revision_id, revision_no: row.revision_no, status: row.revision_status,
+      kind: row.revision_status === 'draft' && row.source_draft_id === null ? 'working_draft' : 'snapshot',
+      title: row.revision_title,
+    },
+  }))
+}
+
 export async function owned(user) {
   requireUser(user)
   const rows = (await query(
     `SELECT l.id AS lecture_id,l.slug,l.publication_status,l.public_revision_id,
-            r.id AS revision_id,r.revision_no,r.source_draft_id,r.status,r.title,r.subtitle,r.updated_at
+            r.id AS revision_id,r.revision_no,r.source_draft_id,r.status,r.title,r.subtitle,r.descr,r.updated_at,
+            (EXISTS (SELECT 1 FROM lecture_revision_covers c WHERE c.lecture_revision_id=r.id) OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover
        FROM lectures l LEFT JOIN lecture_revisions r ON r.lecture_id=l.id
       WHERE l.owner_id=$1
       ORDER BY COALESCE(MAX(r.updated_at) OVER (PARTITION BY l.id),l.updated_at) DESC,l.id DESC,
@@ -62,7 +86,7 @@ export async function owned(user) {
     lectures.get(row.lecture_id).versions.push({
       revision_id: row.revision_id, revision_no: row.revision_no,
       kind: row.status === 'draft' && row.source_draft_id === null ? 'working_draft' : 'snapshot',
-      status: row.status, title: row.title, subtitle: row.subtitle, updated_at: row.updated_at,
+      status: row.status, title: row.title, subtitle: row.subtitle, descr: row.descr, updated_at: row.updated_at, has_cover: row.has_cover,
       is_public: row.publication_status === 'published' && row.public_revision_id === row.revision_id && row.status === 'approved',
     })
   }
@@ -71,7 +95,8 @@ export async function owned(user) {
 
 export async function publicList() {
   return (await query(
-    `SELECT l.id,l.slug,l.is_recommended,r.id AS revision_id,r.title,r.subtitle,r.descr,r.category_id
+    `SELECT l.id,l.slug,l.is_recommended,r.id AS revision_id,r.title,r.subtitle,r.descr,r.category_id,
+            (EXISTS (SELECT 1 FROM lecture_revision_covers c WHERE c.lecture_revision_id=r.id) OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover
        FROM lectures l JOIN lecture_revisions r ON r.id=l.public_revision_id
       WHERE l.publication_status='published' AND r.status='approved' ORDER BY l.id`,
   )).rows
@@ -127,6 +152,39 @@ export async function lectureSection(user, lectureSlug, revisionId, chapterSlug,
   })
 }
 
+export async function getCover(user, revisionId) {
+  return tx(async db => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const row = (await db.query('SELECT l.slug FROM lecture_revisions r JOIN lectures l ON l.id=r.lecture_id WHERE r.id=$1', [revisionId])).rows[0]
+    if (!row) throw notFound('讲义版本')
+    await selectLectureBySlug(db, user, row.slug, revisionId)
+    const cover = (await db.query('SELECT mime,data FROM lecture_revision_covers WHERE lecture_revision_id=$1', [revisionId])).rows[0]
+    if (cover) return { revision_id: revisionId, cover: coverDataUrl(cover) }
+    const legacy = (await db.query("SELECT metadata->'cover' AS cover FROM lecture_revisions WHERE id=$1", [revisionId])).rows[0].cover
+    if (legacy === null || legacy === undefined || legacy === '') throw notFound('封面')
+    if (typeof legacy !== 'string') throw conflict('旧封面数据格式不支持请检查原始数据')
+    return { revision_id: revisionId, cover: legacy }
+  })
+}
+
+export async function setCover(user, revisionId, version, cover) {
+  requireUser(user)
+  return tx(async db => {
+    const initial = (await db.query('SELECT lecture_id FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
+    if (!initial) throw notFound('讲义版本')
+    const lecture = await lectureAccess(db, initial.lecture_id, user, 'edit', true)
+    requireUnarchived(lecture)
+    const revision = (await db.query('SELECT status,source_draft_id,edit_version FROM lecture_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
+    if (revision.status !== 'draft' || revision.source_draft_id !== null) throw conflict('只有工作草稿可以编辑')
+    if (revision.edit_version !== version) throw conflict('草稿已被修改请重新加载')
+    if (cover) {
+      await db.query('INSERT INTO lecture_revision_covers(lecture_revision_id,mime,data) VALUES ($1,$2,$3) ON CONFLICT (lecture_revision_id) DO UPDATE SET mime=EXCLUDED.mime,data=EXCLUDED.data', [revisionId,cover.mime,cover.data])
+    } else await db.query('DELETE FROM lecture_revision_covers WHERE lecture_revision_id=$1', [revisionId])
+    const updated = (await db.query("UPDATE lecture_revisions SET metadata=metadata-'cover',edit_version=edit_version+1 WHERE id=$1 RETURNING edit_version", [revisionId])).rows[0]
+    return { revision_id: revisionId, edit_version: updated.edit_version, has_cover: Boolean(cover) }
+  })
+}
+
 export async function saveSection(user, revisionId, occurrenceId, data) {
   requireUser(user)
   return tx(async db => {
@@ -173,6 +231,9 @@ async function insertTree(db, revisionId, chapters) {
 
 export async function importLecture(user, data) {
   requireUser(user)
+  const metadata = { ...data.lecture.metadata }
+  const cover = metadata.cover === undefined || metadata.cover === '' ? null : parseCover(metadata.cover)
+  delete metadata.cover
   return tx(async db => {
     const input = data.lecture
     let lecture
@@ -185,8 +246,9 @@ export async function importLecture(user, data) {
     const revision = (await db.query(
       `INSERT INTO lecture_revisions(lecture_id,revision_no,title,subtitle,descr,typst_version,metadata,created_by)
        VALUES ($1,1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [lecture.id,input.title,input.subtitle,input.summary,input.typst_version,input.metadata,user.id],
+      [lecture.id,input.title,input.subtitle,input.summary,input.typst_version,metadata,user.id],
     )).rows[0]
+    if (cover) await db.query('INSERT INTO lecture_revision_covers(lecture_revision_id,mime,data) VALUES ($1,$2,$3)', [revision.id,cover.mime,cover.data])
     await insertTree(db, revision.id, data.chapters)
     return { lecture, revision }
   })
@@ -208,9 +270,12 @@ export async function exportRevision(user, revisionId) {
     if (!authorized && !published) throw notFound('讲义版本')
     requireUnarchived(lecture)
     const tree = await snapshot(db, revisionId)
+    const cover = (await db.query('SELECT mime,data FROM lecture_revision_covers WHERE lecture_revision_id=$1', [revisionId])).rows[0]
+    const metadata = { ...selected.metadata }
+    if (cover) metadata.cover = coverDataUrl(cover)
     return {
       type: 'maki-lecture', schema_version: 1,
-      lecture: { slug: lecture.slug, title: selected.title, subtitle: selected.subtitle, summary: selected.descr, typst_version: selected.typst_version, metadata: selected.metadata },
+      lecture: { slug: lecture.slug, title: selected.title, subtitle: selected.subtitle, summary: selected.descr, typst_version: selected.typst_version, metadata },
       chapters: tree.chapters.map(chapter => ({
         slug: chapter.slug, tag: chapter.tag, title: chapter.title, summary: chapter.summary,
         sections: chapter.sections.map(section => ({ slug: section.slug, tag: section.tag, title: section.title, summary: section.summary, source: section.source })),
@@ -236,6 +301,7 @@ export async function copyRevision(user, lectureId, baseId) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
       [lectureId,n,base.id,base.category_id,base.title,base.subtitle,base.descr,base.typst_version,base.metadata,user.id],
     )).rows[0]
+    await db.query('INSERT INTO lecture_revision_covers(lecture_revision_id,mime,data) SELECT $1,mime,data FROM lecture_revision_covers WHERE lecture_revision_id=$2', [createdDraft.id,base.id])
     await insertTree(db, createdDraft.id, tree.chapters)
     return outlineSnapshot(db, createdDraft.id)
   })
@@ -262,10 +328,13 @@ export async function save(user, revisionId, data) {
     }
     await db.query('DELETE FROM lecture_sections WHERE lecture_revision_id=$1', [revisionId])
     await db.query('DELETE FROM lecture_chapters WHERE lecture_revision_id=$1', [revisionId])
+    const metadata = { ...data.metadata }
+    delete metadata.cover
+    if (Object.hasOwn(revision.metadata, 'cover')) metadata.cover = revision.metadata.cover
     await db.query(
       `UPDATE lecture_revisions SET title=$1,subtitle=$2,descr=$3,category_id=$4,typst_version=$5,
        metadata=$6,change_note=$7,edit_version=edit_version+1 WHERE id=$8`,
-      [data.title,data.subtitle,data.descr,data.category_id,data.typst_version,data.metadata,data.change_note,revisionId],
+      [data.title,data.subtitle,data.descr,data.category_id,data.typst_version,metadata,data.change_note,revisionId],
     )
     await insertTree(db, revisionId, data.chapters)
     return outlineSnapshot(db, revisionId)
@@ -299,6 +368,7 @@ export async function submit(user, revisionId, version) {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [row.lecture_id,n,lecture.public_revision_id,row.id,row.category_id,row.title,row.subtitle,row.descr,row.typst_version,row.metadata,row.change_note,user.id],
     )).rows[0]
+    await db.query('INSERT INTO lecture_revision_covers(lecture_revision_id,mime,data) SELECT $1,mime,data FROM lecture_revision_covers WHERE lecture_revision_id=$2', [saved.id,row.id])
     await insertTree(db, saved.id, tree.chapters)
     const submitted = (await db.query("UPDATE lecture_revisions SET status='pending' WHERE id=$1 RETURNING *", [saved.id])).rows[0]
     return { snapshot: submitted, draft_edit_version: row.edit_version }
@@ -371,6 +441,7 @@ export async function deleteArchived(user, lectureId) {
     await db.query("SELECT set_config('maki.lecture_delete_id', $1, true)", [String(lectureId)])
     await db.query('UPDATE lectures SET public_revision_id=NULL WHERE id=$1', [lectureId])
     await db.query('DELETE FROM lecture_reviews WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
+    await db.query('DELETE FROM lecture_revision_covers WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
     await db.query('DELETE FROM lecture_sections WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
     await db.query('DELETE FROM lecture_chapters WHERE lecture_revision_id IN (SELECT id FROM lecture_revisions WHERE lecture_id=$1)', [lectureId])
     await db.query('DELETE FROM lecture_revisions WHERE lecture_id=$1', [lectureId])

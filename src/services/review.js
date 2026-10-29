@@ -4,7 +4,10 @@ import { requireAdmin, requireUnarchived } from './access.js'
 
 export async function pending(user) {
   requireAdmin(user)
-  return (await query("SELECT * FROM lecture_revisions WHERE status='pending' ORDER BY submitted_at,id")).rows
+  return (await query(
+    `SELECT r.*,l.slug AS lecture_slug FROM lecture_revisions r
+     JOIN lectures l ON l.id=r.lecture_id WHERE r.status='pending' ORDER BY r.submitted_at,r.id`,
+  )).rows
 }
 
 export async function decide(user, kind, revisionId, data) {
