@@ -1,4 +1,5 @@
 import { badRequest } from './errors.js'
+import { createHash } from 'node:crypto'
 
 export function parseCover(value) {
   if (typeof value !== 'string') throw badRequest('封面格式不合法')
@@ -15,4 +16,12 @@ export function parseCover(value) {
 
 export function coverDataUrl(cover) {
   return `data:${cover.mime};base64,${cover.data.toString('base64')}`
+}
+
+export function coverHash(data) {
+  return createHash('sha256').update(data).digest('hex')
+}
+
+export function legacyCoverHash(value) {
+  try { return coverHash(parseCover(value).data) } catch { return null }
 }

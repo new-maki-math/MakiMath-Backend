@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { query, tx } from '../db/pool.js'
 import { conflict, forbidden, notFound } from '../lib/errors.js'
 import { requireUser, requireAdmin, lectureAccess, requireUnarchived } from './access.js'
-import { parseCover, coverDataUrl } from '../lib/lecture-cover.js'
+import { parseCover, coverDataUrl, coverHash, legacyCoverHash } from '../lib/lecture-cover.js'
 
 async function snapshot(db, revisionId) {
   const revision = (await db.query('SELECT * FROM lecture_revisions WHERE id=$1', [revisionId])).rows[0]
@@ -13,8 +13,10 @@ async function snapshot(db, revisionId) {
 }
 
 async function outlineSnapshot(db, revisionId) {
-  const revision = (await db.query("SELECT r.*,r.metadata - 'cover' AS metadata,(EXISTS (SELECT 1 FROM lecture_revision_covers c WHERE c.lecture_revision_id=r.id) OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover FROM lecture_revisions r WHERE r.id=$1", [revisionId])).rows[0]
+  const revision = (await db.query("SELECT r.*,r.metadata - 'cover' AS metadata,(c.data IS NOT NULL OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover,encode(sha256(c.data),'hex') AS cover_hash,r.metadata->'cover' AS legacy_cover FROM lecture_revisions r LEFT JOIN lecture_revision_covers c ON c.lecture_revision_id=r.id WHERE r.id=$1", [revisionId])).rows[0]
   if (!revision) throw notFound('讲义版本')
+  revision.cover_hash ??= legacyCoverHash(revision.legacy_cover)
+  delete revision.legacy_cover
   const chapters = (await db.query('SELECT * FROM lecture_chapters WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
   const sections = (await db.query('SELECT id,lecture_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,pos,created_at,updated_at FROM lecture_sections WHERE lecture_revision_id=$1 ORDER BY pos,id', [revisionId])).rows
   return { revision, chapters: chapters.map(chapter => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapter.id) })) }
@@ -67,8 +69,10 @@ export async function owned(user) {
   const rows = (await query(
     `SELECT l.id AS lecture_id,l.slug,l.publication_status,l.public_revision_id,
             r.id AS revision_id,r.revision_no,r.source_draft_id,r.status,r.title,r.subtitle,r.descr,r.updated_at,
-            (EXISTS (SELECT 1 FROM lecture_revision_covers c WHERE c.lecture_revision_id=r.id) OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover
+            (c.data IS NOT NULL OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover,
+            encode(sha256(c.data),'hex') AS cover_hash,r.metadata->'cover' AS legacy_cover
        FROM lectures l LEFT JOIN lecture_revisions r ON r.lecture_id=l.id
+       LEFT JOIN lecture_revision_covers c ON c.lecture_revision_id=r.id
       WHERE l.owner_id=$1
       ORDER BY COALESCE(MAX(r.updated_at) OVER (PARTITION BY l.id),l.updated_at) DESC,l.id DESC,
                CASE WHEN r.status='draft' AND r.source_draft_id IS NULL THEN 0 ELSE 1 END,
@@ -87,6 +91,7 @@ export async function owned(user) {
       revision_id: row.revision_id, revision_no: row.revision_no,
       kind: row.status === 'draft' && row.source_draft_id === null ? 'working_draft' : 'snapshot',
       status: row.status, title: row.title, subtitle: row.subtitle, descr: row.descr, updated_at: row.updated_at, has_cover: row.has_cover,
+      cover_hash: row.cover_hash ?? legacyCoverHash(row.legacy_cover),
       is_public: row.publication_status === 'published' && row.public_revision_id === row.revision_id && row.status === 'approved',
     })
   }
@@ -96,10 +101,12 @@ export async function owned(user) {
 export async function publicList() {
   return (await query(
     `SELECT l.id,l.slug,l.is_recommended,r.id AS revision_id,r.title,r.subtitle,r.descr,r.category_id,
-            (EXISTS (SELECT 1 FROM lecture_revision_covers c WHERE c.lecture_revision_id=r.id) OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover
+            (c.data IS NOT NULL OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover,
+            encode(sha256(c.data),'hex') AS cover_hash,r.metadata->'cover' AS legacy_cover
        FROM lectures l JOIN lecture_revisions r ON r.id=l.public_revision_id
+       LEFT JOIN lecture_revision_covers c ON c.lecture_revision_id=r.id
       WHERE l.publication_status='published' AND r.status='approved' ORDER BY l.id`,
-  )).rows
+  )).rows.map(({ legacy_cover, ...row }) => ({ ...row, cover_hash: row.cover_hash ?? legacyCoverHash(legacy_cover) }))
 }
 
 async function selectLectureBySlug(db, user, lectureSlug, requestedRevisionId) {
@@ -159,11 +166,11 @@ export async function getCover(user, revisionId) {
     if (!row) throw notFound('讲义版本')
     await selectLectureBySlug(db, user, row.slug, revisionId)
     const cover = (await db.query('SELECT mime,data FROM lecture_revision_covers WHERE lecture_revision_id=$1', [revisionId])).rows[0]
-    if (cover) return { revision_id: revisionId, cover: coverDataUrl(cover) }
+    if (cover) return { revision_id: revisionId, cover: coverDataUrl(cover), cover_hash: coverHash(cover.data) }
     const legacy = (await db.query("SELECT metadata->'cover' AS cover FROM lecture_revisions WHERE id=$1", [revisionId])).rows[0].cover
     if (legacy === null || legacy === undefined || legacy === '') throw notFound('封面')
     if (typeof legacy !== 'string') throw conflict('旧封面数据格式不支持请检查原始数据')
-    return { revision_id: revisionId, cover: legacy }
+    return { revision_id: revisionId, cover: legacy, cover_hash: legacyCoverHash(legacy) }
   })
 }
 
@@ -181,7 +188,7 @@ export async function setCover(user, revisionId, version, cover) {
       await db.query('INSERT INTO lecture_revision_covers(lecture_revision_id,mime,data) VALUES ($1,$2,$3) ON CONFLICT (lecture_revision_id) DO UPDATE SET mime=EXCLUDED.mime,data=EXCLUDED.data', [revisionId,cover.mime,cover.data])
     } else await db.query('DELETE FROM lecture_revision_covers WHERE lecture_revision_id=$1', [revisionId])
     const updated = (await db.query("UPDATE lecture_revisions SET metadata=metadata-'cover',edit_version=edit_version+1 WHERE id=$1 RETURNING edit_version", [revisionId])).rows[0]
-    return { revision_id: revisionId, edit_version: updated.edit_version, has_cover: Boolean(cover) }
+    return { revision_id: revisionId, edit_version: updated.edit_version, has_cover: Boolean(cover), cover_hash: cover ? coverHash(cover.data) : null }
   })
 }
 
@@ -209,7 +216,7 @@ export async function saveSection(user, revisionId, occurrenceId, data) {
 export async function revisions(user, lectureId) {
   requireUser(user)
   await lectureAccess({ query }, lectureId, user)
-  return (await query('SELECT * FROM lecture_revisions WHERE lecture_id=$1 ORDER BY revision_no DESC', [lectureId])).rows
+  return (await query("SELECT r.*,encode(sha256(c.data),'hex') AS cover_hash FROM lecture_revisions r LEFT JOIN lecture_revision_covers c ON c.lecture_revision_id=r.id WHERE r.lecture_id=$1 ORDER BY r.revision_no DESC", [lectureId])).rows.map(row => ({ ...row, cover_hash: row.cover_hash ?? legacyCoverHash(row.metadata?.cover) }))
 }
 
 async function insertTree(db, revisionId, chapters) {
