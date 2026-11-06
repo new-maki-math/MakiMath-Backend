@@ -4,15 +4,15 @@ import { buildApp } from '../src/app.js'
 import { pool } from '../src/db/pool.js'
 import { encryptPayload } from '../src/lib/crypto.js'
 import { lectureAccess } from '../src/services/access.js'
-import { submit as submitLecture } from '../src/services/lectures.js'
-import { setPrerequisites, setPointStatus, create as createKnowledge, manage as manageKnowledge } from '../src/services/knowledge.js'
+import { submit as submitLecture } from '../src/services/books.js'
+import { setPrerequisites, create as createKnowledge, manage as manageKnowledge } from '../src/services/knowledge.js'
 import { normalizeIp } from '../src/lib/util.js'
 import { animation } from '../src/lib/validate.js'
 
 test('讲义权限区分所有者与查看和编辑协作者', async () => {
   const db = {
     async query(sql, params) {
-      if (sql.includes('FROM lectures')) return { rows: [{ id: 1, owner_id: 10 }] }
+      if (sql.includes('FROM books')) return { rows: [{ id: 1, owner_id: 10 }] }
       return { rows: params[1] === 20 ? [{ permission: 'view' }] : params[1] === 30 ? [{ permission: 'edit' }] : [] }
     },
   }
@@ -33,8 +33,8 @@ test('知识点维护只允许管理员操作', async () => {
 test('知识点管理列表返回全部分类并转换整数', async () => {
   const originalQuery = pool.query
   pool.query = async () => ({ rows: [
-    { id: 1, status: 'active', category_ids: ['2', '3'] },
-    { id: 2, status: 'archived', category_ids: [] },
+    { id: 1, category_ids: ['2', '3'] },
+    { id: 2, category_ids: [] },
   ] })
   try {
     const rows = await manageKnowledge({ id: 1, role: 'super_admin' })
@@ -43,11 +43,6 @@ test('知识点管理列表返回全部分类并转换整数', async () => {
   } finally {
     pool.query = originalQuery
   }
-})
-
-test('知识点状态只接受启用和归档', async () => {
-  await assert.rejects(() => setPointStatus({ id: 1, role: 'super_admin' }, 1, 'disabled'), { status: 400 })
-  await assert.rejects(() => setPointStatus({ id: 2, role: 'editor' }, 1, 'archived'), { status: 403 })
 })
 
 test('客户端地址转换', () => {
@@ -69,12 +64,12 @@ test('讲义提交拒绝旧版本和重复提交', async () => {
   const client = {
     async query(sql) {
       if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(sql)) return { rows: [] }
-      if (sql.startsWith('SELECT lecture_id')) return { rows: [{ lecture_id: 1 }] }
-      if (sql.startsWith('SELECT * FROM lectures')) return { rows: [{ id: 1, owner_id: 10 }] }
+      if (sql.startsWith('SELECT book_id')) return { rows: [{ book_id: 1 }] }
+      if (sql.startsWith('SELECT * FROM books')) return { rows: [{ id: 1, owner_id: 10 }] }
       if (sql.startsWith('SELECT permission')) return { rows: [] }
-      if (sql.startsWith('SELECT * FROM lecture_revisions')) return { rows: [{ id: 1, status, source_draft_id: null, edit_version: version }] }
-      if (sql.startsWith('SELECT id FROM lecture_revisions WHERE lecture_id')) return { rows: [{ id: 9 }] }
-      if (sql.startsWith('UPDATE lecture_revisions')) {
+      if (sql.startsWith('SELECT * FROM book_revisions')) return { rows: [{ id: 1, status, source_draft_id: null, edit_version: version }] }
+      if (sql.startsWith('SELECT id FROM book_revisions WHERE book_id')) return { rows: [{ id: 9 }] }
+      if (sql.startsWith('UPDATE book_revisions')) {
         status = 'pending'
         version++
         return { rows: [{ id: 1, status, source_draft_id: null, edit_version: version }] }
@@ -135,9 +130,9 @@ test('路由鉴权和参数检查拒绝无权请求', async () => {
   try {
     await app.ready()
     const token = app.jwt.sign({ id: 10, sid: 1, role: 'super_admin' })
-    const missing = await app.inject({ method: 'POST', url: '/api/lectures', payload: encryptPayload({ slug: 'demo', title: '讲义' }) })
+    const missing = await app.inject({ method: 'POST', url: '/api/books', payload: encryptPayload({ slug: 'demo', title: '讲义' }) })
     assert.equal(missing.statusCode, 401)
-    const forbidden = await app.inject({ method: 'GET', url: '/api/reviews/lecture/pending', headers: { authorization: `Bearer ${token}` } })
+    const forbidden = await app.inject({ method: 'GET', url: '/api/reviews/book/pending', headers: { authorization: `Bearer ${token}` } })
     assert.equal(forbidden.statusCode, 403)
     const expiredToken = app.jwt.sign({ id: 10, sid: 2, role: 'super_admin' })
     const expired = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: `Bearer ${expiredToken}` } })
@@ -146,7 +141,7 @@ test('路由鉴权和参数检查拒绝无权请求', async () => {
     const legacy = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { authorization: `Bearer ${legacyToken}` } })
     assert.equal(legacy.statusCode, 401)
     const invalid = await app.inject({
-      method: 'POST', url: '/api/lectures', headers: { authorization: `Bearer ${token}` },
+      method: 'POST', url: '/api/books', headers: { authorization: `Bearer ${token}` },
       payload: encryptPayload({ slug: 'demo', title: '讲义', owner_id: 999 }),
     })
     assert.equal(invalid.statusCode, 400)

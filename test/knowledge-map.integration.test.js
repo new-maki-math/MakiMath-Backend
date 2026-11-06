@@ -23,7 +23,7 @@ test('地图筛选穿过归档分类并返回内部前置关系', { skip: !enabl
       ['map-a-' + suffix,'map-b-' + suffix,'map-c-' + suffix,'map-d-' + suffix,admin.id],
     )).rows
     const extra = (await pool.query(
-      "INSERT INTO knowledge_points(slug,title,source,status,created_by,updated_by) VALUES ($1,'归档分类下','正文','active',$4,$4),($2,'归档知识点','正文','archived',$4,$4),($3,'无分类','正文','active',$4,$4) RETURNING id",
+      "INSERT INTO knowledge_points(slug,title,source,created_by,updated_by) VALUES ($1,'归档分类下','正文',$4,$4),($2,'知识点','正文',$4,$4),($3,'无分类','正文',$4,$4) RETURNING id",
       ['map-e-' + suffix,'map-f-' + suffix,'map-g-' + suffix,admin.id],
     )).rows
     await pool.query('INSERT INTO knowledge_point_categories(knowledge_point_id,category_id) VALUES ($1,$3),($2,$4)', [extra[0].id,extra[1].id,archived.id,root.id])
@@ -37,18 +37,18 @@ test('地图筛选穿过归档分类并返回内部前置关系', { skip: !enabl
     assert.equal(response.statusCode, 200, response.body)
     assert.equal(response.headers['cache-control'], 'no-store')
     const result = decryptPayload(response.json())
-    assert.deepEqual(result.nodes.map(node => node.id), [...points.slice(0,3).map(point => point.id), extra[0].id])
+    assert.deepEqual(result.nodes.map(node => node.id), [...points.slice(0,3).map(point => point.id), extra[0].id,extra[1].id])
     assert.deepEqual(result.nodes.find(node => node.id === extra[0].id).category_ids, [])
-    assert.equal(result.nodes.some(node => node.id === extra[1].id), false)
+    assert.equal(result.nodes.some(node => node.id === extra[1].id), true)
     assert.deepEqual(result.nodes[0].category_ids, [root.id,child.id].sort((a,b) => a-b))
     assert.equal(result.categories.some(category => category.id === archived.id), false)
     assert.equal(result.categories.find(category => category.id === child.id).parent_id, archived.id)
     assert.deepEqual(result.edges, [{ source: points[0].id, target: points[1].id }])
-    assert.equal(result.stats.node_count, 4)
+    assert.equal(result.stats.node_count, 5)
     assert.equal(result.stats.edge_count, 1)
     const unfiltered = decryptPayload((await app.inject({ method: 'GET', url: '/api/knowledge-map' })).json())
     assert.equal(unfiltered.nodes.some(node => node.id === extra[2].id), true)
-    assert.equal(unfiltered.nodes.some(node => node.id === extra[1].id), false)
+    assert.equal(unfiltered.nodes.some(node => node.id === extra[1].id), true)
     assert.equal((await app.inject({ method: 'GET', url: `/api/knowledge-map?category_id=${archived.id}` })).statusCode, 404)
     assert.equal((await app.inject({ method: 'GET', url: '/api/knowledge-map?category_id=0' })).statusCode, 400)
   } finally {

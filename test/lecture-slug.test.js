@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { pool } from '../src/db/pool.js'
-import { lectureBySlug } from '../src/services/lectures.js'
+import { lectureOutline as lectureBySlug } from '../src/services/books.js'
 
 function clientFor(lecture, revisions, collaborators = []) {
   const calls = []
@@ -9,11 +9,11 @@ function clientFor(lecture, revisions, collaborators = []) {
     calls,
     async query(sql, params = []) {
       calls.push(sql)
-      if (sql.startsWith('SELECT id,slug,owner_id')) return { rows: lecture && params[0] === lecture.slug ? [lecture] : [] }
-      if (sql.startsWith('SELECT 1 FROM lecture_collaborators')) return { rows: collaborators.includes(params[1]) ? [{ '?column?': 1 }] : [] }
+      if (sql.startsWith('SELECT id,slug,kind,owner_id')) return { rows: lecture && params[0] === lecture.slug ? [lecture] : [] }
+      if (sql.startsWith('SELECT 1 FROM book_collaborators')) return { rows: collaborators.includes(params[1]) ? [{ '?column?': 1 }] : [] }
       if (sql.startsWith('SELECT id,title,status,updated_at')) return { rows: revisions.filter(item => item.status === 'draft' && item.source_draft_id === null) }
-      if (sql.startsWith('SELECT id,status FROM lecture_revisions')) return { rows: revisions.filter(item => item.id === params[0] && item.lecture_id === params[1]) }
-      if (sql.startsWith('SELECT * FROM lecture_revisions')) return { rows: revisions.filter(item => item.id === params[0]) }
+      if (sql.startsWith('SELECT id,status FROM book_revisions')) return { rows: revisions.filter(item => item.id === params[0] && item.book_id === params[1]) }
+      if (sql.startsWith('SELECT r.*,r.metadata')) return { rows: revisions.filter(item => item.id === params[0]).map(item => ({ ...item, legacy_cover: null })) }
       return { rows: [] }
     },
     release() {},
@@ -24,7 +24,7 @@ test('公开 slug 默认读取已发布版本而不会切换草稿', async () =>
   const original = pool.connect
   const client = clientFor(
     { id: 1, slug: 'lecture', owner_id: 2, publication_status: 'published', public_revision_id: 10, is_recommended: false },
-    [{ id: 10, lecture_id: 1, status: 'approved' }, { id: 11, lecture_id: 1, status: 'draft', source_draft_id: null }],
+    [{ id: 10, book_id: 1, status: 'approved' }, { id: 11, book_id: 1, status: 'draft', source_draft_id: null }],
   )
   pool.connect = async () => client
   try {
@@ -42,7 +42,7 @@ test('私有 slug 只允许所有者协作者和管理员读取', async () => {
   const original = pool.connect
   const client = clientFor(
     { id: 1, slug: 'private', owner_id: 2, publication_status: 'unpublished', public_revision_id: null, is_recommended: false },
-    [{ id: 11, lecture_id: 1, status: 'draft', source_draft_id: null }, { id: 12, lecture_id: 1, status: 'pending' }],
+    [{ id: 11, book_id: 1, status: 'draft', source_draft_id: null }, { id: 12, book_id: 1, status: 'pending' }],
     [3],
   )
   pool.connect = async () => client
@@ -61,7 +61,7 @@ test('未同步的多草稿数据不会被静默选择', async () => {
   const original = pool.connect
   pool.connect = async () => clientFor(
     { id: 1, slug: 'private', owner_id: 2, publication_status: 'unpublished', public_revision_id: null, is_recommended: false },
-    [{ id: 11, lecture_id: 1, status: 'draft', source_draft_id: null }, { id: 12, lecture_id: 1, status: 'draft', source_draft_id: null }],
+    [{ id: 11, book_id: 1, status: 'draft', source_draft_id: null }, { id: 12, book_id: 1, status: 'draft', source_draft_id: null }],
   )
   try {
     await assert.rejects(() => lectureBySlug({ id: 2, role: 'editor' }, 'private'), { status: 409 })
