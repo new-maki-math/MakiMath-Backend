@@ -79,6 +79,95 @@ CREATE INDEX audit_logs_user_idx ON audit_logs (user_id);
 CREATE INDEX audit_logs_created_idx ON audit_logs (created_at DESC);
 CREATE INDEX audit_logs_method_path_idx ON audit_logs (method, path);
 
+-- 资源文件夹与文档共用目录身份
+CREATE TABLE resources (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id bigint REFERENCES resources(id) ON DELETE RESTRICT,
+  kind text NOT NULL CHECK (kind IN ('folder', 'pdf')),
+  name text NOT NULL CHECK (btrim(name) <> '' AND char_length(name) <= 200),
+  description text NOT NULL DEFAULT '',
+  is_system boolean NOT NULL DEFAULT false,
+  download_count bigint NOT NULL DEFAULT 0 CHECK (download_count >= 0 AND (kind = 'pdf' OR download_count = 0)),
+  size_bytes bigint,
+  content_hash text,
+  content bytea,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (parent_id IS DISTINCT FROM id),
+  CHECK (NOT is_system OR (kind = 'folder' AND parent_id IS NULL)),
+  CHECK ((kind = 'folder' AND size_bytes IS NULL AND content_hash IS NULL AND content IS NULL)
+      OR (kind = 'pdf' AND size_bytes IS NOT NULL AND size_bytes BETWEEN 1 AND 33554432 AND size_bytes = octet_length(content)
+          AND content_hash IS NOT NULL AND content_hash ~ '^[a-f0-9]{64}$' AND content IS NOT NULL))
+);
+
+-- 同一目录的资源名称不能重复
+CREATE UNIQUE INDEX resources_sibling_name_idx ON resources (COALESCE(parent_id, 0), lower(name));
+CREATE UNIQUE INDEX resources_one_system_idx ON resources (is_system) WHERE is_system;
+CREATE INDEX resources_parent_idx ON resources (parent_id, kind, id);
+
+-- 创建受保护的归档目录
+INSERT INTO resources(kind, name, is_system) VALUES ('folder', '已归档', true);
+
+-- 下载用量按账号和时间统计
+CREATE TABLE resource_download_usage (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id bigint REFERENCES users(id) ON DELETE RESTRICT,
+  anonymous_key text CHECK (anonymous_key ~ '^[a-f0-9]{64}$'),
+  bytes bigint NOT NULL CHECK (bytes >= 0),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK ((user_id IS NOT NULL) <> (anonymous_key IS NOT NULL))
+);
+CREATE INDEX resource_download_usage_user_time_idx ON resource_download_usage (user_id, created_at);
+CREATE INDEX resource_download_usage_anonymous_time_idx ON resource_download_usage (anonymous_key, created_at) WHERE anonymous_key IS NOT NULL;
+
+-- 资源目录变更在事务内串行检查父节点和环路
+CREATE FUNCTION guard_resource_tree() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+  parent_kind text;
+  has_cycle boolean;
+BEGIN
+  PERFORM pg_advisory_xact_lock(1296124745, 1);
+  IF TG_OP = 'DELETE' THEN
+    IF OLD.is_system THEN RAISE EXCEPTION '系统目录不可删除'; END IF;
+    RETURN OLD;
+  END IF;
+  IF TG_OP = 'UPDATE' AND OLD.is_system THEN RAISE EXCEPTION '系统目录不可编辑'; END IF;
+  IF TG_OP = 'UPDATE' AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.is_system IS DISTINCT FROM OLD.is_system) THEN
+    RAISE EXCEPTION '资源身份和类型不可修改';
+  END IF;
+  IF NEW.parent_id IS NOT NULL THEN
+    SELECT kind INTO parent_kind FROM resources WHERE id = NEW.parent_id;
+    IF parent_kind IS DISTINCT FROM 'folder' THEN RAISE EXCEPTION '父资源必须是文件夹'; END IF;
+    WITH RECURSIVE ancestors AS (
+      SELECT id, parent_id FROM resources WHERE id = NEW.parent_id
+      UNION
+      SELECT r.id, r.parent_id FROM resources r JOIN ancestors a ON r.id = a.parent_id
+    ) SELECT EXISTS (SELECT 1 FROM ancestors WHERE id = NEW.id) INTO has_cycle;
+    IF has_cycle THEN RAISE EXCEPTION '资源目录不能成环'; END IF;
+  END IF;
+  IF TG_OP = 'UPDATE' AND NEW.download_count IS DISTINCT FROM OLD.download_count
+     AND NEW.parent_id IS NOT DISTINCT FROM OLD.parent_id
+     AND NEW.name IS NOT DISTINCT FROM OLD.name
+     AND NEW.description IS NOT DISTINCT FROM OLD.description
+     AND NEW.size_bytes IS NOT DISTINCT FROM OLD.size_bytes
+     AND NEW.content_hash IS NOT DISTINCT FROM OLD.content_hash
+     AND NEW.content IS NOT DISTINCT FROM OLD.content
+     AND NEW.created_at IS NOT DISTINCT FROM OLD.created_at
+     AND NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at THEN
+    RETURN NEW;
+  ELSIF TG_OP = 'UPDATE' THEN
+    NEW.updated_at := GREATEST(clock_timestamp(), OLD.updated_at + interval '1 microsecond');
+  ELSE
+    NEW.updated_at := clock_timestamp();
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER resources_guard BEFORE INSERT OR UPDATE OR DELETE ON resources
+  FOR EACH ROW EXECUTE FUNCTION guard_resource_tree();
+
 -- 知识分类支持多级父子关系
 CREATE TABLE knowledge_categories (
   id         bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 分类标识

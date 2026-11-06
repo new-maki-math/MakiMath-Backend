@@ -25,6 +25,7 @@
     "bcryptjs": "^3.0.3",
     "fastify": "^5.12.7",
     "fastify-plugin": "^6.0.1",
+    "pdf-lib": "^1.17.1",
     "pg": "^8.23.1"
   },
   "devDependencies": {

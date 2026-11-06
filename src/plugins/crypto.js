@@ -31,7 +31,7 @@ async function payloadCryptoPlugin(app) {
     }
 
     // 1.2 拦截写操作，执行密文解密
-    if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+    if (['POST', 'PUT', 'PATCH'].includes(req.method) && !req.routeOptions.config.rawResource) {
       if (req.body != null) {
         const isEncryptedBody =
           typeof req.body === 'object' && typeof req.body.d === 'string' && req.body.d.length >= 40

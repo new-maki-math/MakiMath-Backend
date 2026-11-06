@@ -44,6 +44,7 @@ export function errorHandler(err, req, reply) {
   if (err instanceof HttpError) {
     const body = { error: err.message }
     if (err.details !== undefined) body.details = err.details
+    if (err.details?.code) body.code = err.details.code
     return reply.code(err.status).send(body)
   }
 

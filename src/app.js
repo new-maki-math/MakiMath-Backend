@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
+import multipart from '@fastify/multipart'
 import { config } from './config.js'
 import { ping, setPoolLogger } from './db/pool.js'
 import { errorHandler } from './lib/errors.js'
@@ -11,6 +12,7 @@ import knowledgeRoutes from './routes/knowledge.js'
 import lectureRoutes from './routes/lectures.js'
 import reviewRoutes from './routes/review.js'
 import searchRoutes from './routes/search.js'
+import resourceRoutes from './routes/resources.js'
 
 export async function buildApp(options = {}) {
   const logger = { level: process.env.LOG_LEVEL ?? 'info' }
@@ -32,8 +34,9 @@ export async function buildApp(options = {}) {
   setPoolLogger(app.log)
   app.setErrorHandler(errorHandler)
   app.setNotFoundHandler((req, reply) => reply.code(404).send({ error: '接口不存在' }))
-  await app.register(cors, { origin: true })
+  await app.register(cors, { origin: true, exposedHeaders: ['Content-Range','Accept-Ranges','Content-Disposition'] })
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' })
+  await app.register(multipart, { limits: { fileSize: 33554432, files: 1, fields: 4, parts: 5 } })
   await app.register(payloadCryptoPlugin)
   await app.register(authPlugin)
   app.get('/health', async () => ({ ok: true, ...(await ping()), uptime: Math.round(process.uptime()) }))
@@ -43,6 +46,7 @@ export async function buildApp(options = {}) {
     await api.register(lectureRoutes)
     await api.register(reviewRoutes)
     await api.register(searchRoutes)
+    await api.register(resourceRoutes)
   }, { prefix: '/api' })
   return app
 }
