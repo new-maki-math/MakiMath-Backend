@@ -19,6 +19,13 @@ export default async function knowledgeRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     return service.getPublicBySlug(slug(req.params.slug))
   })
+  app.post('/knowledge-points/batch', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    const d = body(req.body, ['slugs'], ['slugs'])
+    const slugs = list(d.slugs, 1000).map(slug)
+    if (new Set(slugs).size !== slugs.length) throw badRequest('知识点标识不能重复')
+    return service.getPublicBatch(slugs)
+  })
   app.get('/knowledge-points/manage', { preHandler: [app.requireLogin] }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.manage(req.user)

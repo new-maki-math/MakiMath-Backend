@@ -77,6 +77,14 @@ export default async function lectureRoutes(app) {
     const revisionId = req.query.revision_id === undefined ? null : id(req.query.revision_id)
     return service.lectureOutline(req.user, req.params.slug, revisionId)
   })
+  app.get('/lectures/by-slug/:slug/print-data', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    slug(req.params.slug)
+    const chapter = req.query.chapter_slug === undefined ? null : string(req.query.chapter_slug, 100)
+    const section = req.query.section_slug === undefined ? null : string(req.query.section_slug, 100)
+    if (section !== null && chapter === null) throw badRequest('指定小节时必须提供章节标识')
+    return service.printData(req.user, req.params.slug, id(req.query.revision_id), id(req.query.edit_version), chapter, section)
+  })
   app.get('/lectures/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     slug(req.params.slug)

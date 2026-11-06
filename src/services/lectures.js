@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { query, tx } from '../db/pool.js'
-import { conflict, forbidden, notFound } from '../lib/errors.js'
+import { badRequest, conflict, forbidden, notFound } from '../lib/errors.js'
 import { requireUser, requireAdmin, lectureAccess, requireUnarchived } from './access.js'
 import { parseCover, coverDataUrl, coverHash, legacyCoverHash } from '../lib/lecture-cover.js'
 
@@ -140,6 +140,30 @@ export async function lectureOutline(user, lectureSlug, revisionId = null) {
     await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     const { lecture, selected } = await selectLectureBySlug(db, user, lectureSlug, revisionId)
     return { lecture, ...(await outlineSnapshot(db, selected.id)) }
+  })
+}
+
+export async function printData(user, lectureSlug, revisionId, editVersion, chapterSlug, sectionSlug) {
+  return tx(async db => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const { lecture, selected } = await selectLectureBySlug(db, user, lectureSlug, revisionId)
+    const revision = (await db.query('SELECT id,title,subtitle,descr,typst_version,metadata,edit_version FROM lecture_revisions WHERE id=$1', [selected.id])).rows[0]
+    if (revision.edit_version !== editVersion) throw conflict('讲义内容已修改请重新加载目录')
+    const chapters = (await db.query(
+      'SELECT id,slug,tag,title,summary,pos FROM lecture_chapters WHERE lecture_revision_id=$1 AND ($2::text IS NULL OR slug=$2) ORDER BY pos,id', [revisionId,chapterSlug],
+    )).rows
+    if (chapterSlug !== null && !chapters.length) throw notFound('讲义章节')
+    const sections = (await db.query(
+      `SELECT s.chapter_id,s.slug,s.tag,s.title,s.summary,s.source,s.pos FROM lecture_sections s
+       JOIN lecture_chapters c ON c.id=s.chapter_id AND c.lecture_revision_id=s.lecture_revision_id
+       WHERE s.lecture_revision_id=$1 AND ($2::text IS NULL OR c.slug=$2) AND ($3::text IS NULL OR s.slug=$3)
+       ORDER BY c.pos,c.id,s.pos,s.id`, [revisionId,chapterSlug,sectionSlug],
+    )).rows
+    if (sectionSlug !== null && !sections.length) throw notFound('讲义小节')
+    delete revision.metadata.cover
+    const result = { lecture, revision, chapters: chapters.map(({ id: chapterId, ...chapter }) => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapterId).map(({ chapter_id, ...section }) => section) })) }
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 16 * 1024 * 1024) throw badRequest('讲义内容过大请缩小打印范围')
+    return result
   })
 }
 

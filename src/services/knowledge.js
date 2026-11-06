@@ -21,6 +21,16 @@ export async function getPublicBySlug(pointSlug) {
   return publicDetail(row)
 }
 
+export async function getPublicBatch(slugs) {
+  const rows = (await query(
+    "SELECT id,slug,title,source FROM knowledge_points WHERE slug=ANY($1::text[]) AND status='active' ORDER BY slug", [slugs],
+  )).rows
+  const found = new Set(rows.map(row => row.slug))
+  const missing = slugs.filter(value => !found.has(value))
+  if (Buffer.byteLength(JSON.stringify(rows), 'utf8') > 16 * 1024 * 1024) throw badRequest('知识点内容过大请缩小批次')
+  return { points: rows, missing }
+}
+
 async function publicDetail(row) {
   if (!row) throw notFound('知识点')
   const categories = (await query(
