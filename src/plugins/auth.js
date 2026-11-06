@@ -8,7 +8,7 @@ import { normalizeIp } from '../lib/util.js'
 
 const sensitive = new Set([
   'password', 'passwordhash', 'oldpassword', 'newpassword', 'token', 'refreshtoken', 'accesstoken',
-  'secret', 'invitecode', 'source', 'animation', 'metadata', 'chapters',
+  'secret', 'invitecode', 'source', 'stemsource', 'focussource', 'solutionsource', 'conclusionsource', 'pitfallssource', 'animation', 'metadata', 'chapters',
 ])
 
 function sanitizePayload(data) {

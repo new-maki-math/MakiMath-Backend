@@ -1,8 +1,8 @@
 -- 本脚本用于初始化空数据库
--- 知识点和讲义分别维护独立身份
--- 讲义源码引用知识点永久标识
+-- 知识点和图书分别维护独立身份
+-- 图书源码引用知识点永久标识
 -- 提交审核的内容版本不可继续编辑
--- 个人讲义与批注及掌握状态由浏览器本地保存
+-- 个人图书与批注及掌握状态由浏览器本地保存
 -- 本脚本不包含旧数据库的迁移与兼容处理
 
 BEGIN;
@@ -184,10 +184,10 @@ CREATE TABLE knowledge_categories (
 
 CREATE INDEX knowledge_categories_parent_idx ON knowledge_categories (parent_id, pos, id);
 
--- 讲义分类与知识分类独立维护
-CREATE TABLE lecture_categories (
+-- 图书分类与知识分类独立维护
+CREATE TABLE book_categories (
   id         bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 分类标识
-  parent_id  bigint      REFERENCES lecture_categories(id) ON DELETE RESTRICT, -- 父分类标识
+  parent_id  bigint      REFERENCES book_categories(id) ON DELETE RESTRICT, -- 父分类标识
   slug       text        NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'), -- 分类别名
   name       text        NOT NULL CHECK (btrim(name) <> ''), -- 分类名称
   descr      text        NOT NULL DEFAULT '', -- 分类说明
@@ -195,16 +195,15 @@ CREATE TABLE lecture_categories (
   status     text        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')), -- 分类状态
   created_at timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  CONSTRAINT lecture_categories_no_self CHECK (parent_id IS DISTINCT FROM id)
+  CONSTRAINT book_categories_no_self CHECK (parent_id IS DISTINCT FROM id)
 );
 
-CREATE INDEX lecture_categories_parent_idx ON lecture_categories (parent_id, pos, id);
+CREATE INDEX book_categories_parent_idx ON book_categories (parent_id, pos, id);
 
 -- 知识点标识独立于标题和正文
 CREATE TABLE knowledge_points (
   id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 知识点永久标识
   slug               text        NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'), -- 知识点别名
-  status             text        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')), -- 知识点生命周期状态
   title              text        NOT NULL CHECK (btrim(title) <> ''), -- 知识点标题
   source             text        NOT NULL CHECK (btrim(source) <> ''), -- 知识点正文
   created_by         bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 知识点创建人
@@ -213,7 +212,6 @@ CREATE TABLE knowledge_points (
   updated_at         timestamptz NOT NULL DEFAULT now() -- 更新时间
 );
 
-CREATE INDEX knowledge_points_status_idx ON knowledge_points (status);
 CREATE INDEX knowledge_points_created_by_idx ON knowledge_points (created_by);
 CREATE INDEX knowledge_points_title_trgm_idx ON knowledge_points USING gin (title gin_trgm_ops);
 
@@ -227,7 +225,7 @@ CREATE TABLE knowledge_point_categories (
 
 CREATE INDEX knowledge_point_categories_category_idx ON knowledge_point_categories (category_id, knowledge_point_id);
 
--- 知识点前置关系独立于讲义编排
+-- 知识点前置关系独立于图书编排
 CREATE TABLE knowledge_prerequisites (
   knowledge_point_id bigint      NOT NULL REFERENCES knowledge_points(id) ON DELETE RESTRICT, -- 当前知识点标识
   prerequisite_id    bigint      NOT NULL REFERENCES knowledge_points(id) ON DELETE RESTRICT, -- 前置知识点标识
@@ -239,47 +237,99 @@ CREATE TABLE knowledge_prerequisites (
 
 CREATE INDEX knowledge_prerequisites_reverse_idx ON knowledge_prerequisites (prerequisite_id, knowledge_point_id);
 
--- 讲义身份包含独立的发布状态与推荐标记
-CREATE TABLE lectures (
-  id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 讲义永久标识
-  slug               text        NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'), -- 讲义别名
-  owner_id           bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 讲义所有者
+-- 题目来源目录支持多级组织
+CREATE TABLE question_categories (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  parent_id bigint REFERENCES question_categories(id) ON DELETE RESTRICT,
+  slug text NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND char_length(slug) <= 100),
+  name text NOT NULL CHECK (btrim(name) <> '' AND char_length(name) <= 200),
+  pos integer NOT NULL DEFAULT 0 CHECK (pos >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CHECK (parent_id IS DISTINCT FROM id)
+);
+CREATE UNIQUE INDEX question_categories_sibling_name_idx ON question_categories (COALESCE(parent_id, 0), lower(btrim(name)));
+CREATE INDEX question_categories_parent_idx ON question_categories (parent_id, pos, id);
+
+-- 题目实体保存共享正文
+CREATE TABLE questions (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  slug text NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND char_length(slug) <= 100),
+  difficulty smallint NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
+  stem_source text NOT NULL CHECK (btrim(stem_source) <> ''),
+  focus_source text NOT NULL DEFAULT '',
+  solution_source text NOT NULL DEFAULT '',
+  conclusion_source text NOT NULL DEFAULT '',
+  pitfalls_source text NOT NULL DEFAULT '',
+  created_by bigint NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  updated_by bigint NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+-- 来源条目直接指向共享题目
+CREATE TABLE question_entries (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  category_id bigint NOT NULL REFERENCES question_categories(id) ON DELETE RESTRICT,
+  question_id bigint NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
+  source_number text NOT NULL DEFAULT '' CHECK (char_length(source_number) <= 200),
+  pos integer NOT NULL DEFAULT 0 CHECK (pos >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  UNIQUE (category_id, question_id)
+);
+CREATE INDEX question_entries_category_pos_idx ON question_entries (category_id, pos, id);
+CREATE INDEX question_entries_question_idx ON question_entries (question_id, id);
+
+-- 题目与知识点按永久身份关联
+CREATE TABLE question_knowledge_points (
+  question_id bigint NOT NULL REFERENCES questions(id) ON DELETE RESTRICT,
+  knowledge_point_id bigint NOT NULL REFERENCES knowledge_points(id) ON DELETE CASCADE,
+  PRIMARY KEY (question_id, knowledge_point_id)
+);
+CREATE INDEX question_knowledge_points_point_idx ON question_knowledge_points (knowledge_point_id, question_id);
+
+-- 图书身份包含独立的发布状态与推荐标记
+CREATE TABLE books (
+  id                 bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 图书永久标识
+  slug               text        NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'), -- 图书别名
+  kind               text        NOT NULL CHECK (kind IN ('lecture', 'workbook')), -- 图书类型
+  owner_id           bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 图书所有者
   publication_status text        NOT NULL DEFAULT 'unpublished' CHECK (publication_status IN ('unpublished', 'published', 'withdrawn', 'archived')), -- 上下架状态
   public_revision_id bigint, -- 当前公开版本标识
   is_recommended     boolean     NOT NULL DEFAULT false, -- 推荐展示标记
   created_at         timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at         timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  CONSTRAINT lectures_publication_check CHECK (publication_status <> 'published' OR public_revision_id IS NOT NULL),
-  CONSTRAINT lectures_recommendation_check CHECK (NOT is_recommended OR publication_status = 'published')
+  CONSTRAINT books_publication_check CHECK (publication_status <> 'published' OR public_revision_id IS NOT NULL),
+  CONSTRAINT books_recommendation_check CHECK (NOT is_recommended OR publication_status = 'published')
 );
 
-CREATE INDEX lectures_owner_idx ON lectures (owner_id);
-CREATE INDEX lectures_publication_idx ON lectures (publication_status, is_recommended, updated_at DESC);
+CREATE INDEX books_owner_idx ON books (owner_id);
+CREATE INDEX books_publication_idx ON books (publication_status, is_recommended, updated_at DESC);
 
--- 协作者权限独立于讲义所有权
-CREATE TABLE lecture_collaborators (
-  lecture_id bigint      NOT NULL REFERENCES lectures(id) ON DELETE CASCADE, -- 讲义标识
+-- 协作者权限独立于图书所有权
+CREATE TABLE book_collaborators (
+  book_id bigint      NOT NULL REFERENCES books(id) ON DELETE CASCADE, -- 图书标识
   user_id    bigint      NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- 协作者标识
   permission text        NOT NULL DEFAULT 'edit' CHECK (permission IN ('view', 'edit')), -- 查看或编辑权限
   invited_by bigint      REFERENCES users(id) ON DELETE SET NULL, -- 授权人标识
   created_at timestamptz NOT NULL DEFAULT now(), -- 授权时间
-  PRIMARY KEY (lecture_id, user_id)
+  PRIMARY KEY (book_id, user_id)
 );
 
-CREATE INDEX lecture_collaborators_user_idx ON lecture_collaborators (user_id, lecture_id);
+CREATE INDEX book_collaborators_user_idx ON book_collaborators (user_id, book_id);
 
--- 讲义版本保存完整快照的元数据
-CREATE TABLE lecture_revisions (
-  id            bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 讲义版本标识
-  lecture_id    bigint      NOT NULL REFERENCES lectures(id) ON DELETE RESTRICT, -- 所属讲义标识
-  revision_no   integer     NOT NULL CHECK (revision_no > 0), -- 讲义内版本序号
-  based_on_id   bigint, -- 所依据的同一讲义版本
+-- 图书版本保存完整快照的元数据
+CREATE TABLE book_revisions (
+  id            bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 图书版本标识
+  book_id    bigint      NOT NULL REFERENCES books(id) ON DELETE RESTRICT, -- 所属图书标识
+  revision_no   integer     NOT NULL CHECK (revision_no > 0), -- 图书内版本序号
+  based_on_id   bigint, -- 所依据的同一图书版本
   source_draft_id bigint, -- 待审快照的工作草稿标识
-  category_id   bigint      REFERENCES lecture_categories(id) ON DELETE RESTRICT, -- 本版讲义分类
+  category_id   bigint      REFERENCES book_categories(id) ON DELETE RESTRICT, -- 本版图书分类
   title         text        NOT NULL DEFAULT '', -- 本版标题
   subtitle      text        NOT NULL DEFAULT '', -- 本版副标题
   descr         text        NOT NULL DEFAULT '', -- 本版简介
-  typst_version text        NOT NULL DEFAULT '0.15.1', -- 本版排版版本
   metadata      jsonb       NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'), -- 本版渲染配置
   change_note   text        NOT NULL DEFAULT '', -- 修改说明
   created_by    bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 本版创建人
@@ -289,43 +339,43 @@ CREATE TABLE lecture_revisions (
   reviewed_at   timestamptz, -- 完成审核时间
   created_at    timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at    timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  UNIQUE (lecture_id, revision_no),
-  UNIQUE (lecture_id, id),
-  CONSTRAINT lecture_revisions_base_fk FOREIGN KEY (lecture_id, based_on_id)
-    REFERENCES lecture_revisions(lecture_id, id) DEFERRABLE INITIALLY DEFERRED,
-  CONSTRAINT lecture_revisions_source_draft_fk FOREIGN KEY (lecture_id, source_draft_id)
-    REFERENCES lecture_revisions(lecture_id, id) DEFERRABLE INITIALLY DEFERRED,
-  CONSTRAINT lecture_revisions_no_self_base CHECK (based_on_id IS DISTINCT FROM id),
-  CONSTRAINT lecture_revisions_no_self_source CHECK (source_draft_id IS DISTINCT FROM id),
-  CONSTRAINT lecture_revisions_snapshot_source_check CHECK (status = 'draft' OR source_draft_id IS NOT NULL),
-  CONSTRAINT lecture_revisions_times_check CHECK (
+  UNIQUE (book_id, revision_no),
+  UNIQUE (book_id, id),
+  CONSTRAINT book_revisions_base_fk FOREIGN KEY (book_id, based_on_id)
+    REFERENCES book_revisions(book_id, id) DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT book_revisions_source_draft_fk FOREIGN KEY (book_id, source_draft_id)
+    REFERENCES book_revisions(book_id, id) DEFERRABLE INITIALLY DEFERRED,
+  CONSTRAINT book_revisions_no_self_base CHECK (based_on_id IS DISTINCT FROM id),
+  CONSTRAINT book_revisions_no_self_source CHECK (source_draft_id IS DISTINCT FROM id),
+  CONSTRAINT book_revisions_snapshot_source_check CHECK (status = 'draft' OR source_draft_id IS NOT NULL),
+  CONSTRAINT book_revisions_times_check CHECK (
     (status = 'draft' AND submitted_at IS NULL AND reviewed_at IS NULL)
     OR (status = 'pending' AND submitted_at IS NOT NULL AND reviewed_at IS NULL)
     OR (status IN ('approved', 'rejected') AND submitted_at IS NOT NULL AND reviewed_at IS NOT NULL AND reviewed_at >= submitted_at)
   )
 );
 
-ALTER TABLE lectures ADD CONSTRAINT lectures_public_revision_fk
+ALTER TABLE books ADD CONSTRAINT books_public_revision_fk
   FOREIGN KEY (id, public_revision_id)
-  REFERENCES lecture_revisions(lecture_id, id) ON DELETE RESTRICT;
-CREATE INDEX lecture_revisions_category_idx ON lecture_revisions (category_id);
-CREATE INDEX lecture_revisions_created_by_idx ON lecture_revisions (created_by);
-CREATE INDEX lecture_revisions_review_idx ON lecture_revisions (status, submitted_at);
-CREATE UNIQUE INDEX lecture_revisions_one_pending_idx ON lecture_revisions (lecture_id) WHERE status = 'pending';
-CREATE UNIQUE INDEX lecture_revisions_one_working_draft_idx ON lecture_revisions (lecture_id) WHERE status = 'draft' AND source_draft_id IS NULL;
-CREATE INDEX lecture_revisions_title_trgm_idx ON lecture_revisions USING gin (title gin_trgm_ops);
+  REFERENCES book_revisions(book_id, id) ON DELETE RESTRICT;
+CREATE INDEX book_revisions_category_idx ON book_revisions (category_id);
+CREATE INDEX book_revisions_created_by_idx ON book_revisions (created_by);
+CREATE INDEX book_revisions_review_idx ON book_revisions (status, submitted_at);
+CREATE UNIQUE INDEX book_revisions_one_pending_idx ON book_revisions (book_id) WHERE status = 'pending';
+CREATE UNIQUE INDEX book_revisions_one_working_draft_idx ON book_revisions (book_id) WHERE status = 'draft' AND source_draft_id IS NULL;
+CREATE INDEX book_revisions_title_trgm_idx ON book_revisions USING gin (title gin_trgm_ops);
 
--- 讲义版本封面独立存储
-CREATE TABLE lecture_revision_covers (
-  lecture_revision_id bigint PRIMARY KEY REFERENCES lecture_revisions(id) ON DELETE RESTRICT,
+-- 图书版本封面独立存储
+CREATE TABLE book_revision_covers (
+  book_revision_id bigint PRIMARY KEY REFERENCES book_revisions(id) ON DELETE RESTRICT,
   mime text NOT NULL CHECK (mime IN ('image/png', 'image/jpeg', 'image/webp')),
   data bytea NOT NULL CHECK (octet_length(data) BETWEEN 1 AND 524288)
 );
 
--- 讲义章节属于确定的讲义版本
-CREATE TABLE lecture_chapters (
+-- 图书章节属于确定的图书版本
+CREATE TABLE book_chapters (
   id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 版本内章节标识
-  lecture_revision_id bigint      NOT NULL REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 所属讲义版本
+  book_revision_id bigint      NOT NULL REFERENCES book_revisions(id) ON DELETE RESTRICT, -- 所属图书版本
   occurrence_id       uuid        NOT NULL DEFAULT gen_random_uuid(), -- 跨草稿复制时保留的章节实例标识
   slug                text        NOT NULL CHECK (btrim(slug) <> ''), -- 版本内章节别名
   tag                 text        NOT NULL DEFAULT '', -- 章节编号文案
@@ -334,16 +384,16 @@ CREATE TABLE lecture_chapters (
   pos                 integer     NOT NULL CHECK (pos >= 0), -- 章节顺序
   created_at          timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at          timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  UNIQUE (lecture_revision_id, id),
-  UNIQUE (lecture_revision_id, occurrence_id),
-  UNIQUE (lecture_revision_id, slug),
-  UNIQUE (lecture_revision_id, pos) DEFERRABLE INITIALLY DEFERRED
+  UNIQUE (book_revision_id, id),
+  UNIQUE (book_revision_id, occurrence_id),
+  UNIQUE (book_revision_id, slug),
+  UNIQUE (book_revision_id, pos) DEFERRABLE INITIALLY DEFERRED
 );
 
--- 讲义小节保存完整源码
-CREATE TABLE lecture_sections (
+-- 图书小节保存完整源码
+CREATE TABLE book_sections (
   id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 版本内小节标识
-  lecture_revision_id bigint      NOT NULL REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 所属讲义版本
+  book_revision_id bigint      NOT NULL REFERENCES book_revisions(id) ON DELETE RESTRICT, -- 所属图书版本
   chapter_id          bigint      NOT NULL, -- 同一版本内的章节标识
   occurrence_id       uuid        NOT NULL DEFAULT gen_random_uuid(), -- 跨草稿复制时保留的小节实例标识
   slug                text        NOT NULL CHECK (btrim(slug) <> ''), -- 章节内小节别名
@@ -354,25 +404,25 @@ CREATE TABLE lecture_sections (
   pos                 integer     NOT NULL CHECK (pos >= 0), -- 小节顺序
   created_at          timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at          timestamptz NOT NULL DEFAULT now(), -- 更新时间
-  UNIQUE (lecture_revision_id, id),
-  UNIQUE (lecture_revision_id, occurrence_id),
+  UNIQUE (book_revision_id, id),
+  UNIQUE (book_revision_id, occurrence_id),
   UNIQUE (chapter_id, slug),
   UNIQUE (chapter_id, pos) DEFERRABLE INITIALLY DEFERRED,
-  CONSTRAINT lecture_sections_chapter_fk FOREIGN KEY (lecture_revision_id, chapter_id)
-    REFERENCES lecture_chapters(lecture_revision_id, id) ON DELETE RESTRICT
+  CONSTRAINT book_sections_chapter_fk FOREIGN KEY (book_revision_id, chapter_id)
+    REFERENCES book_chapters(book_revision_id, id) ON DELETE RESTRICT
 );
 
--- 讲义审核记录绑定完整讲义版本
-CREATE TABLE lecture_reviews (
+-- 图书审核记录绑定完整图书版本
+CREATE TABLE book_reviews (
   id                  bigint      GENERATED ALWAYS AS IDENTITY PRIMARY KEY, -- 审核记录标识
-  lecture_revision_id bigint      NOT NULL UNIQUE REFERENCES lecture_revisions(id) ON DELETE RESTRICT, -- 被审核的完整讲义版本
+  book_revision_id bigint      NOT NULL UNIQUE REFERENCES book_revisions(id) ON DELETE RESTRICT, -- 被审核的完整图书版本
   reviewer_id         bigint      NOT NULL REFERENCES users(id) ON DELETE RESTRICT, -- 审核人标识
   decision            text        NOT NULL CHECK (decision IN ('approved', 'rejected')), -- 审核结论
   comment             text        NOT NULL DEFAULT '', -- 审核意见
   created_at          timestamptz NOT NULL DEFAULT now() -- 审核时间
 );
 
-CREATE INDEX lecture_reviews_reviewer_idx ON lecture_reviews (reviewer_id, created_at DESC);
+CREATE INDEX book_reviews_reviewer_idx ON book_reviews (reviewer_id, created_at DESC);
 
 -- 关系图写入锁用于并发安全的环路检查
 CREATE TABLE content_graph_locks (
@@ -381,7 +431,7 @@ CREATE TABLE content_graph_locks (
 );
 
 INSERT INTO content_graph_locks (scope)
-VALUES ('knowledge_categories'), ('lecture_categories'), ('knowledge_prerequisites');
+VALUES ('knowledge_categories'), ('book_categories'), ('question_categories'), ('knowledge_prerequisites');
 
 -- 写入图关系前更新锁记录
 CREATE FUNCTION lock_content_graph() RETURNS trigger
@@ -452,12 +502,12 @@ BEGIN
 END;
 $$;
 
--- 限定事务内删除指定的归档讲义
-CREATE FUNCTION is_archived_lecture_deletion(target_id bigint) RETURNS boolean
+-- 限定事务内删除指定的归档图书
+CREATE FUNCTION is_archived_book_deletion(target_id bigint) RETURNS boolean
 LANGUAGE sql STABLE AS $$
   SELECT EXISTS (
-    SELECT 1 FROM lectures WHERE id = target_id AND publication_status = 'archived'
-      AND id::text = current_setting('maki.lecture_delete_id', true)
+    SELECT 1 FROM books WHERE id = target_id AND publication_status = 'archived'
+      AND id::text = current_setting('maki.book_delete_id', true)
   );
 $$;
 
@@ -468,7 +518,7 @@ DECLARE
   review_exists boolean;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    IF OLD.status <> 'draft' AND NOT is_archived_lecture_deletion(OLD.lecture_id) THEN
+    IF OLD.status <> 'draft' AND NOT is_archived_book_deletion(OLD.book_id) THEN
       RAISE EXCEPTION '已提交版本不可删除';
     END IF;
     RETURN OLD;
@@ -485,28 +535,28 @@ BEGIN
     RAISE EXCEPTION '版本身份与来源不可修改';
   END IF;
   IF NEW.based_on_id IS DISTINCT FROM OLD.based_on_id THEN
-    IF TG_TABLE_NAME <> 'lecture_revisions' OR OLD.status <> 'draft' OR NEW.status <> 'draft' THEN
+    IF TG_TABLE_NAME <> 'book_revisions' OR OLD.status <> 'draft' OR NEW.status <> 'draft' THEN
       RAISE EXCEPTION '版本来源不可修改';
     END IF;
     IF NOT EXISTS (
-      SELECT 1 FROM lecture_revisions r JOIN lectures l ON l.public_revision_id = r.id
+      SELECT 1 FROM book_revisions r JOIN books l ON l.public_revision_id = r.id
       WHERE r.id = NEW.based_on_id AND r.source_draft_id = OLD.id
-        AND r.status = 'approved' AND l.id = OLD.lecture_id
+        AND r.status = 'approved' AND l.id = OLD.book_id
     ) THEN
       RAISE EXCEPTION '草稿只能跟进由自身发布的版本';
     END IF;
   END IF;
-  IF NEW.lecture_id IS DISTINCT FROM OLD.lecture_id OR NEW.created_by IS DISTINCT FROM OLD.created_by
+  IF NEW.book_id IS DISTINCT FROM OLD.book_id OR NEW.created_by IS DISTINCT FROM OLD.created_by
      OR NEW.source_draft_id IS DISTINCT FROM OLD.source_draft_id THEN
-    RAISE EXCEPTION '讲义版本归属与创建人不可修改';
+    RAISE EXCEPTION '图书版本归属与创建人不可修改';
   END IF;
   IF OLD.status = 'draft' THEN
     IF NEW.status = 'pending' THEN
       IF btrim(NEW.title) = '' THEN
         RAISE EXCEPTION '提交审核前必须填写标题';
       END IF;
-      IF NOT EXISTS (SELECT 1 FROM lecture_sections WHERE lecture_revision_id = NEW.id AND btrim(source) <> '') THEN
-        RAISE EXCEPTION '提交审核前必须编排讲义内容';
+      IF NOT EXISTS (SELECT 1 FROM book_sections WHERE book_revision_id = NEW.id AND btrim(source) <> '') THEN
+        RAISE EXCEPTION '提交审核前必须编排图书内容';
       END IF;
       NEW.submitted_at := clock_timestamp();
       NEW.reviewed_at := NULL;
@@ -521,7 +571,7 @@ BEGIN
       RAISE EXCEPTION '审核不能修改提交版本的内容';
     END IF;
     SELECT EXISTS (
-      SELECT 1 FROM lecture_reviews WHERE lecture_revision_id = OLD.id AND decision = NEW.status
+      SELECT 1 FROM book_reviews WHERE book_revision_id = OLD.id AND decision = NEW.status
     ) INTO review_exists;
     IF NOT review_exists THEN
       RAISE EXCEPTION '必须通过审核记录更新版本状态';
@@ -535,29 +585,29 @@ BEGIN
 END;
 $$;
 
--- 编辑目录源码或引用时锁定所属讲义版本
-CREATE FUNCTION guard_lecture_content() RETURNS trigger
+-- 编辑目录源码或引用时锁定所属图书版本
+CREATE FUNCTION guard_book_content() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   revision_id bigint;
   revision_status text;
-  owner_lecture_id bigint;
+  owner_book_id bigint;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    revision_id := OLD.lecture_revision_id;
+    revision_id := OLD.book_revision_id;
   ELSE
-    revision_id := NEW.lecture_revision_id;
+    revision_id := NEW.book_revision_id;
     IF TG_OP = 'UPDATE' THEN
       IF NEW.id IS DISTINCT FROM OLD.id
-         OR NEW.lecture_revision_id IS DISTINCT FROM OLD.lecture_revision_id
+         OR NEW.book_revision_id IS DISTINCT FROM OLD.book_revision_id
          OR NEW.occurrence_id IS DISTINCT FROM OLD.occurrence_id
          OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
         RAISE EXCEPTION '内容实例身份与版本归属不可修改';
       END IF;
     END IF;
   END IF;
-  SELECT status, lecture_id INTO revision_status, owner_lecture_id FROM lecture_revisions WHERE id = revision_id FOR UPDATE;
-  IF TG_OP = 'DELETE' AND is_archived_lecture_deletion(owner_lecture_id) THEN
+  SELECT status, book_id INTO revision_status, owner_book_id FROM book_revisions WHERE id = revision_id FOR UPDATE;
+  IF TG_OP = 'DELETE' AND is_archived_book_deletion(owner_book_id) THEN
     RETURN OLD;
   END IF;
   IF revision_status IS DISTINCT FROM 'draft' THEN
@@ -577,12 +627,12 @@ LANGUAGE plpgsql AS $$
 DECLARE
   revision_status text;
 BEGIN
-  IF TG_OP = 'UPDATE' AND NEW.id IS DISTINCT FROM OLD.id THEN
-    RAISE EXCEPTION '永久身份标识不可修改';
+  IF TG_OP = 'UPDATE' AND (NEW.id IS DISTINCT FROM OLD.id OR NEW.kind IS DISTINCT FROM OLD.kind) THEN
+    RAISE EXCEPTION '图书身份与类型不可修改';
   END IF;
   IF NEW.public_revision_id IS NOT NULL THEN
-    SELECT status INTO revision_status FROM lecture_revisions
-     WHERE id = NEW.public_revision_id AND lecture_id = NEW.id FOR SHARE;
+    SELECT status INTO revision_status FROM book_revisions
+     WHERE id = NEW.public_revision_id AND book_id = NEW.id FOR SHARE;
     IF revision_status IS DISTINCT FROM 'approved' THEN
       RAISE EXCEPTION '公开入口必须指向本体的已审核通过版本';
     END IF;
@@ -597,11 +647,11 @@ CREATE FUNCTION guard_content_review() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   revision_status text;
-  owner_lecture_id bigint;
+  owner_book_id bigint;
 BEGIN
   IF TG_OP = 'DELETE' THEN
-    SELECT lecture_id INTO owner_lecture_id FROM lecture_revisions WHERE id = OLD.lecture_revision_id;
-    IF is_archived_lecture_deletion(owner_lecture_id) THEN
+    SELECT book_id INTO owner_book_id FROM book_revisions WHERE id = OLD.book_revision_id;
+    IF is_archived_book_deletion(owner_book_id) THEN
       RETURN OLD;
     END IF;
   END IF;
@@ -611,7 +661,7 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM users WHERE id = NEW.reviewer_id AND role = 'super_admin' AND status = 'active') THEN
     RAISE EXCEPTION '审核人必须为有效超级管理员';
   END IF;
-  SELECT status INTO revision_status FROM lecture_revisions WHERE id = NEW.lecture_revision_id FOR UPDATE;
+  SELECT status INTO revision_status FROM book_revisions WHERE id = NEW.book_revision_id FOR UPDATE;
   IF revision_status IS DISTINCT FROM 'pending' THEN
     RAISE EXCEPTION '只能审核待审核版本';
   END IF;
@@ -624,7 +674,7 @@ $$;
 CREATE FUNCTION apply_content_review() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
-  UPDATE lecture_revisions SET status = NEW.decision WHERE id = NEW.lecture_revision_id;
+  UPDATE book_revisions SET status = NEW.decision WHERE id = NEW.book_revision_id;
   RETURN NEW;
 END;
 $$;
@@ -657,67 +707,96 @@ CREATE TRIGGER invitations_touch BEFORE UPDATE ON invitations
   FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 CREATE TRIGGER knowledge_categories_touch BEFORE UPDATE ON knowledge_categories
   FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
-CREATE TRIGGER lecture_categories_touch BEFORE UPDATE ON lecture_categories
+CREATE TRIGGER book_categories_touch BEFORE UPDATE ON book_categories
   FOR EACH ROW EXECUTE FUNCTION touch_updated_at();
 
 CREATE TRIGGER knowledge_categories_lock BEFORE INSERT OR UPDATE OR DELETE ON knowledge_categories
   FOR EACH STATEMENT EXECUTE FUNCTION lock_content_graph();
-CREATE TRIGGER lecture_categories_lock BEFORE INSERT OR UPDATE OR DELETE ON lecture_categories
+CREATE TRIGGER book_categories_lock BEFORE INSERT OR UPDATE OR DELETE ON book_categories
   FOR EACH STATEMENT EXECUTE FUNCTION lock_content_graph();
 CREATE TRIGGER knowledge_prerequisites_lock BEFORE INSERT OR UPDATE OR DELETE ON knowledge_prerequisites
   FOR EACH STATEMENT EXECUTE FUNCTION lock_content_graph();
 CREATE TRIGGER knowledge_categories_guard BEFORE INSERT OR UPDATE ON knowledge_categories
   FOR EACH ROW EXECUTE FUNCTION guard_category_parent();
-CREATE TRIGGER lecture_categories_guard BEFORE INSERT OR UPDATE ON lecture_categories
+CREATE TRIGGER book_categories_guard BEFORE INSERT OR UPDATE ON book_categories
+  FOR EACH ROW EXECUTE FUNCTION guard_category_parent();
+CREATE TRIGGER question_categories_lock BEFORE INSERT OR UPDATE OR DELETE ON question_categories
+  FOR EACH STATEMENT EXECUTE FUNCTION lock_content_graph();
+CREATE TRIGGER question_categories_guard BEFORE INSERT OR UPDATE ON question_categories
   FOR EACH ROW EXECUTE FUNCTION guard_category_parent();
 CREATE TRIGGER knowledge_prerequisites_guard BEFORE INSERT OR UPDATE ON knowledge_prerequisites
   FOR EACH ROW EXECUTE FUNCTION guard_knowledge_prerequisite();
 
-CREATE TRIGGER lecture_revisions_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_revisions
+CREATE TRIGGER book_revisions_guard BEFORE INSERT OR UPDATE OR DELETE ON book_revisions
   FOR EACH ROW EXECUTE FUNCTION guard_content_revision();
-CREATE TRIGGER lecture_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_chapters
-  FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
-CREATE TRIGGER lecture_sections_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_sections
-  FOR EACH ROW EXECUTE FUNCTION guard_lecture_content();
+CREATE TRIGGER book_chapters_guard BEFORE INSERT OR UPDATE OR DELETE ON book_chapters
+  FOR EACH ROW EXECUTE FUNCTION guard_book_content();
+CREATE TRIGGER book_sections_guard BEFORE INSERT OR UPDATE OR DELETE ON book_sections
+  FOR EACH ROW EXECUTE FUNCTION guard_book_content();
 
--- 仅允许修改草稿封面或删除指定归档讲义
-CREATE FUNCTION guard_lecture_cover() RETURNS trigger
+-- 仅允许修改草稿封面或删除指定归档图书
+CREATE FUNCTION guard_book_cover() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   revision_id bigint;
   revision_status text;
   owner_id bigint;
 BEGIN
-  IF TG_OP = 'DELETE' THEN revision_id := OLD.lecture_revision_id;
+  IF TG_OP = 'DELETE' THEN revision_id := OLD.book_revision_id;
   ELSE
-    revision_id := NEW.lecture_revision_id;
-    IF TG_OP = 'UPDATE' AND NEW.lecture_revision_id IS DISTINCT FROM OLD.lecture_revision_id THEN
+    revision_id := NEW.book_revision_id;
+    IF TG_OP = 'UPDATE' AND NEW.book_revision_id IS DISTINCT FROM OLD.book_revision_id THEN
       RAISE EXCEPTION '封面版本归属不可修改';
     END IF;
   END IF;
-  SELECT status, lecture_id INTO revision_status, owner_id FROM lecture_revisions WHERE id = revision_id FOR UPDATE;
-  IF TG_OP = 'DELETE' AND is_archived_lecture_deletion(owner_id) THEN RETURN OLD; END IF;
+  SELECT status, book_id INTO revision_status, owner_id FROM book_revisions WHERE id = revision_id FOR UPDATE;
+  IF TG_OP = 'DELETE' AND is_archived_book_deletion(owner_id) THEN RETURN OLD; END IF;
   IF revision_status IS DISTINCT FROM 'draft' THEN RAISE EXCEPTION '只能修改草稿封面'; END IF;
   IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
   RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER lecture_revision_covers_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_revision_covers
-  FOR EACH ROW EXECUTE FUNCTION guard_lecture_cover();
+CREATE TRIGGER book_revision_covers_guard BEFORE INSERT OR UPDATE OR DELETE ON book_revision_covers
+  FOR EACH ROW EXECUTE FUNCTION guard_book_cover();
 
 CREATE TRIGGER knowledge_points_guard BEFORE UPDATE ON knowledge_points
   FOR EACH ROW EXECUTE FUNCTION guard_knowledge_point();
-CREATE TRIGGER lectures_public_guard BEFORE INSERT OR UPDATE ON lectures
+
+-- 题库身份不可修改并维护并发版本时间
+CREATE FUNCTION guard_question_identity() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.id IS DISTINCT FROM OLD.id OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+    RAISE EXCEPTION '题库身份不可修改';
+  END IF;
+  IF (to_jsonb(NEW)->'slug') IS DISTINCT FROM (to_jsonb(OLD)->'slug') THEN
+    RAISE EXCEPTION '题库标识不可修改';
+  END IF;
+  IF (to_jsonb(NEW)->'created_by') IS DISTINCT FROM (to_jsonb(OLD)->'created_by') THEN
+    RAISE EXCEPTION '题目创建人不可修改';
+  END IF;
+  IF (to_jsonb(NEW)->'question_id') IS DISTINCT FROM (to_jsonb(OLD)->'question_id') THEN
+    RAISE EXCEPTION '来源关联的题目不可修改';
+  END IF;
+  NEW.updated_at := GREATEST(clock_timestamp(), OLD.updated_at + interval '1 microsecond');
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER question_categories_identity BEFORE UPDATE ON question_categories FOR EACH ROW EXECUTE FUNCTION guard_question_identity();
+CREATE TRIGGER questions_identity BEFORE UPDATE ON questions FOR EACH ROW EXECUTE FUNCTION guard_question_identity();
+CREATE TRIGGER question_entries_identity BEFORE UPDATE ON question_entries FOR EACH ROW EXECUTE FUNCTION guard_question_identity();
+
+CREATE TRIGGER books_public_guard BEFORE INSERT OR UPDATE ON books
   FOR EACH ROW EXECUTE FUNCTION guard_public_revision();
-CREATE TRIGGER lecture_reviews_guard BEFORE INSERT OR UPDATE OR DELETE ON lecture_reviews
+CREATE TRIGGER book_reviews_guard BEFORE INSERT OR UPDATE OR DELETE ON book_reviews
   FOR EACH ROW EXECUTE FUNCTION guard_content_review();
-CREATE TRIGGER lecture_reviews_apply AFTER INSERT ON lecture_reviews
+CREATE TRIGGER book_reviews_apply AFTER INSERT ON book_reviews
   FOR EACH ROW EXECUTE FUNCTION apply_content_review();
 
 -- 审核通过后由服务端在事务中更新公开入口
 -- 推荐标记由服务端按发布策略单独设置
--- 讲义展示当前有效的知识点
+-- 图书展示当前有效的知识点
 -- 已提交版本和审核记录需要保留以支持追溯
 -- 内容关联的账号应优先停用以保留归属和贡献记录
 -- 管理员账号由部署流程创建并设置独立密码

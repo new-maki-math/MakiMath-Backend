@@ -16,13 +16,13 @@ export function requireAdmin(user) {
 
 export async function lectureAccess(db, lectureId, user, permission = 'view', lock = false) {
   const { rows } = await db.query(
-    `SELECT * FROM lectures WHERE id = $1 ${lock ? 'FOR UPDATE' : ''}`,
+    `SELECT * FROM books WHERE id = $1 ${lock ? 'FOR UPDATE' : ''}`,
     [lectureId],
   )
   const lecture = rows[0]
   if (!lecture) throw notFound('讲义')
   const collaborator = user ? (await db.query(
-    'SELECT permission FROM lecture_collaborators WHERE lecture_id=$1 AND user_id=$2',
+    'SELECT permission FROM book_collaborators WHERE book_id=$1 AND user_id=$2',
     [lectureId, user.id],
   )).rows[0] : null
   const owner = user && (user.role === 'super_admin' || lecture.owner_id === user.id)

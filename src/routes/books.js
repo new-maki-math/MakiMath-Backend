@@ -1,4 +1,4 @@
-import * as service from '../services/lectures.js'
+import * as service from '../services/books.js'
 import { badRequest } from '../lib/errors.js'
 import { body, id, integer, string, slug, object, list, choice } from '../lib/validate.js'
 import { parseCover } from '../lib/lecture-cover.js'
@@ -29,14 +29,19 @@ function validateTree(chapters) {
 }
 
 function validateImport(data) {
-  body(data, ['type','schema_version','lecture','chapters'], ['type','schema_version','lecture','chapters'])
-  if (data.type !== 'maki-lecture' || data.schema_version !== 1) throw badRequest('讲义文件类型或版本不支持')
-  const lecture = body(data.lecture, ['slug','title','subtitle','summary','typst_version','metadata'], ['slug','title','subtitle','summary','typst_version','metadata'])
+  const legacy = data?.type === 'maki-lecture'
+  const key = legacy ? 'lecture' : 'book'
+  body(data, ['type','schema_version',key,'chapters'], ['type','schema_version',key,'chapters'])
+  if ((!legacy && data.type !== 'maki-book') || data.schema_version !== 1) throw badRequest('图书文件类型或版本不支持')
+  const allowed = ['slug','title','subtitle','summary','kind','metadata']
+  if (legacy) allowed.push('typst_version')
+  const lecture = body(data[key], allowed, ['slug','title','subtitle','summary','metadata'])
   slug(lecture.slug)
   string(lecture.title, 200)
   string(lecture.subtitle, 500, true)
   string(lecture.summary, 5000, true)
-  string(lecture.typst_version, 50)
+  if (lecture.kind !== undefined) choice(lecture.kind, ['lecture','workbook'])
+  else if (!legacy) throw badRequest('缺少字段 kind')
   object(lecture.metadata)
   const chapterSlugs = new Set()
   let count = 0
@@ -57,27 +62,27 @@ function validateImport(data) {
       if (++count > 2000) throw badRequest('讲义小节数量超出限制')
     }
   }
-  return data
+  return { ...data, book: lecture }
 }
 
 export default async function lectureRoutes(app) {
-  app.get('/lectures', async () => service.publicList())
-  app.get('/lectures/mine', { preHandler: [app.requireLogin] }, async req => service.mine(req.user))
-  app.get('/lectures/manage', { preHandler: [app.requireAdmin] }, async (req, reply) => {
+  app.get('/books', async () => service.publicList())
+  app.get('/books/mine', { preHandler: [app.requireLogin] }, async req => service.mine(req.user))
+  app.get('/books/manage', { preHandler: [app.requireAdmin] }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.manage(req.user)
   })
-  app.get('/lectures/owned', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.get('/books/owned', { preHandler: [app.requireLogin] }, async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.owned(req.user)
   })
-  app.get('/lectures/by-slug/:slug/outline', async (req, reply) => {
+  app.get('/books/by-slug/:slug/outline', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     slug(req.params.slug)
     const revisionId = req.query.revision_id === undefined ? null : id(req.query.revision_id)
     return service.lectureOutline(req.user, req.params.slug, revisionId)
   })
-  app.get('/lectures/by-slug/:slug/print-data', async (req, reply) => {
+  app.get('/books/by-slug/:slug/print-data', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     slug(req.params.slug)
     const chapter = req.query.chapter_slug === undefined ? null : string(req.query.chapter_slug, 100)
@@ -85,49 +90,50 @@ export default async function lectureRoutes(app) {
     if (section !== null && chapter === null) throw badRequest('指定小节时必须提供章节标识')
     return service.printData(req.user, req.params.slug, id(req.query.revision_id), id(req.query.edit_version), chapter, section)
   })
-  app.get('/lectures/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug', async (req, reply) => {
+  app.get('/books/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     slug(req.params.slug)
     string(req.params.chapterSlug, 100)
     string(req.params.sectionSlug, 100)
     return service.lectureSection(req.user, req.params.slug, id(req.params.revisionId), req.params.chapterSlug, req.params.sectionSlug, id(req.query.edit_version))
   })
-  app.post('/lectures', { preHandler: [app.requireLogin] }, async (req, reply) => {
-    const d = body(req.body, ['slug','title'], ['slug','title'])
+  app.post('/books', { preHandler: [app.requireLogin] }, async (req, reply) => {
+    const d = body(req.body, ['slug','title','kind'], ['slug','title','kind'])
     slug(d.slug)
     string(d.title, 200)
+    choice(d.kind, ['lecture','workbook'])
     const result = await service.create(req.user, d)
     reply.code(201)
     return result
   })
-  app.post('/lectures/import', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.post('/books/import', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const result = await service.importLecture(req.user, validateImport(req.body))
     reply.code(201)
     return result
   })
-  app.get('/lectures/:id/revisions', { preHandler: [app.requireLogin] }, async req =>
+  app.get('/books/:id/revisions', { preHandler: [app.requireLogin] }, async req =>
     service.revisions(req.user, id(req.params.id)))
-  app.post('/lectures/:id/revisions', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.post('/books/:id/revisions', { preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['based_on_id'], ['based_on_id'])
     const result = await service.copyRevision(req.user, id(req.params.id), id(d.based_on_id))
     reply.code(201)
     return result
   })
-  app.get('/lecture-revisions/:id/export', async (req, reply) => {
+  app.get('/book-revisions/:id/export', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.exportRevision(req.user, id(req.params.id))
   })
-  app.get('/lecture-revisions/:id/cover', async (req, reply) => {
+  app.get('/book-revisions/:id/cover', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
     return service.getCover(req.user, id(req.params.id))
   })
-  app.put('/lecture-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/book-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['edit_version','cover'], ['edit_version','cover'])
     return service.setCover(req.user, id(req.params.id), integer(d.edit_version, 1), parseCover(d.cover))
   })
-  app.delete('/lecture-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req =>
+  app.delete('/book-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req =>
     service.setCover(req.user, id(req.params.id), id(req.query.edit_version), null))
-  app.put('/lecture-revisions/:id/sections/:occurrenceId', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/book-revisions/:id/sections/:occurrenceId', { preHandler: [app.requireLogin] }, async req => {
     occurrence(req.params.occurrenceId)
     const fields = ['edit_version','slug','tag','title','summary','source']
     const d = body(req.body, fields, fields)
@@ -137,43 +143,42 @@ export default async function lectureRoutes(app) {
     string(d.source, 200000, true)
     return service.saveSection(req.user, id(req.params.id), req.params.occurrenceId, d)
   })
-  app.put('/lecture-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
-    const fields = ['edit_version','title','subtitle','descr','category_id','typst_version','metadata','change_note','chapters']
+  app.put('/book-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
+    const fields = ['edit_version','title','subtitle','descr','category_id','metadata','change_note','chapters']
     const d = body(req.body, fields, fields)
     integer(d.edit_version, 1)
     string(d.title, 200)
     string(d.subtitle, 500, true)
     string(d.descr, 5000, true)
     if (d.category_id !== null) id(d.category_id)
-    string(d.typst_version, 50)
     object(d.metadata)
     string(d.change_note, 2000, true)
     validateTree(d.chapters)
     return service.save(req.user, id(req.params.id), d)
   })
-  app.post('/lecture-revisions/:id/submit', { preHandler: [app.requireLogin] }, async req => {
+  app.post('/book-revisions/:id/submit', { preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['edit_version'], ['edit_version'])
     return service.submit(req.user, id(req.params.id), integer(d.edit_version, 1))
   })
-  app.put('/lectures/:id/collaborators/:userId', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/books/:id/collaborators/:userId', { preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['permission'], ['permission'])
     return service.setCollaborator(req.user, id(req.params.id), id(req.params.userId), choice(d.permission, ['view','edit']))
   })
-  app.get('/lectures/:id/collaborators', { preHandler: [app.requireLogin] }, async req =>
+  app.get('/books/:id/collaborators', { preHandler: [app.requireLogin] }, async req =>
     service.collaborators(req.user, id(req.params.id)))
-  app.delete('/lectures/:id/collaborators/:userId', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.delete('/books/:id/collaborators/:userId', { preHandler: [app.requireLogin] }, async (req, reply) => {
     await service.removeCollaborator(req.user, id(req.params.id), id(req.params.userId))
     reply.code(204)
   })
-  app.patch('/lectures/:id/publication', { preHandler: [app.requireLogin] }, async req => {
+  app.patch('/books/:id/publication', { preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['publication_status','is_recommended'])
     if (d.publication_status !== undefined) choice(d.publication_status, ['published','withdrawn','archived'])
     if (d.is_recommended !== undefined && typeof d.is_recommended !== 'boolean') throw badRequest('推荐标记必须为布尔值')
     return service.publication(req.user, id(req.params.id), d.publication_status, d.is_recommended)
   })
-  app.post('/lectures/:id/restore', { preHandler: [app.requireLogin] }, async req =>
+  app.post('/books/:id/restore', { preHandler: [app.requireLogin] }, async req =>
     service.restore(req.user, id(req.params.id)))
-  app.delete('/lectures/:id', { preHandler: [app.requireAdmin] }, async (req, reply) => {
+  app.delete('/books/:id', { preHandler: [app.requireAdmin] }, async (req, reply) => {
     await service.deleteArchived(req.user, id(req.params.id))
     reply.code(204)
   })

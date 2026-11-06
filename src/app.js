@@ -9,10 +9,11 @@ import authPlugin from './plugins/auth.js'
 import payloadCryptoPlugin from './plugins/crypto.js'
 import authRoutes from './routes/auth.js'
 import knowledgeRoutes from './routes/knowledge.js'
-import lectureRoutes from './routes/lectures.js'
+import lectureRoutes from './routes/books.js'
 import reviewRoutes from './routes/review.js'
 import searchRoutes from './routes/search.js'
 import resourceRoutes from './routes/resources.js'
+import questionRoutes from './routes/questions.js'
 
 export async function buildApp(options = {}) {
   const logger = { level: process.env.LOG_LEVEL ?? 'info' }
@@ -47,6 +48,7 @@ export async function buildApp(options = {}) {
     await api.register(reviewRoutes)
     await api.register(searchRoutes)
     await api.register(resourceRoutes)
+    await api.register(questionRoutes)
   }, { prefix: '/api' })
   return app
 }

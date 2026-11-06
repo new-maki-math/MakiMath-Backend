@@ -4,26 +4,26 @@ import { requireAdmin } from './access.js'
 import { validateKnowledgeImport } from '../lib/knowledge-import.js'
 
 export async function listPublic() {
-  return (await query("SELECT id,slug,title FROM knowledge_points WHERE status='active' ORDER BY id")).rows
+  return (await query('SELECT id,slug,title FROM knowledge_points ORDER BY id')).rows
 }
 
 export async function getPublic(pointId) {
   const row = (await query(
-    "SELECT id,slug,title,source FROM knowledge_points WHERE id=$1 AND status='active'", [pointId],
+    'SELECT id,slug,title,source FROM knowledge_points WHERE id=$1', [pointId],
   )).rows[0]
   return publicDetail(row)
 }
 
 export async function getPublicBySlug(pointSlug) {
   const row = (await query(
-    "SELECT id,slug,title,source FROM knowledge_points WHERE slug=$1 AND status='active'", [pointSlug],
+    'SELECT id,slug,title,source FROM knowledge_points WHERE slug=$1', [pointSlug],
   )).rows[0]
   return publicDetail(row)
 }
 
 export async function getPublicBatch(slugs) {
   const rows = (await query(
-    "SELECT id,slug,title,source FROM knowledge_points WHERE slug=ANY($1::text[]) AND status='active' ORDER BY slug", [slugs],
+    'SELECT id,slug,title,source FROM knowledge_points WHERE slug=ANY($1::text[]) ORDER BY slug', [slugs],
   )).rows
   const found = new Set(rows.map(row => row.slug))
   const missing = slugs.filter(value => !found.has(value))
@@ -44,7 +44,7 @@ async function publicDetail(row) {
 export async function manage(user) {
   requireAdmin(user)
   const rows = (await query(
-    `SELECT p.id,p.slug,p.title,p.status,p.created_by,p.updated_by,p.created_at,p.updated_at,
+    `SELECT p.id,p.slug,p.title,p.created_by,p.updated_by,p.created_at,p.updated_at,
             COALESCE(array_agg(pc.category_id ORDER BY pc.category_id)
               FILTER (WHERE pc.category_id IS NOT NULL), '{}'::bigint[]) AS category_ids
        FROM knowledge_points p LEFT JOIN knowledge_point_categories pc ON pc.knowledge_point_id=p.id
@@ -145,13 +145,13 @@ export async function importPoints(user, categoryId, data) {
 }
 
 export async function categories(kind) {
-  const table = kind === 'knowledge' ? 'knowledge_categories' : 'lecture_categories'
+  const table = kind === 'knowledge' ? 'knowledge_categories' : 'book_categories'
   return (await query(`SELECT id, parent_id, slug, name, descr, pos FROM ${table} WHERE status='active' ORDER BY pos,id`)).rows
 }
 
 export async function createCategory(user, kind, data) {
   requireAdmin(user)
-  const table = kind === 'knowledge' ? 'knowledge_categories' : 'lecture_categories'
+  const table = kind === 'knowledge' ? 'knowledge_categories' : 'book_categories'
   return (await query(
     `INSERT INTO ${table}(parent_id,slug,name,descr,pos) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
     [data.parent_id ?? null, data.slug, data.name, data.descr ?? '', data.pos ?? 0],
@@ -160,7 +160,7 @@ export async function createCategory(user, kind, data) {
 
 export async function updateCategory(user, kind, categoryId, data) {
   requireAdmin(user)
-  const table = kind === 'knowledge' ? 'knowledge_categories' : 'lecture_categories'
+  const table = kind === 'knowledge' ? 'knowledge_categories' : 'book_categories'
   return tx(async (db) => {
     const current = (await db.query(`SELECT * FROM ${table} WHERE id=$1 FOR UPDATE`, [categoryId])).rows[0]
     if (!current) throw notFound('分类')
@@ -169,14 +169,6 @@ export async function updateCategory(user, kind, categoryId, data) {
       [data.parent_id, data.name, data.descr, data.pos, data.status, categoryId],
     )).rows[0]
   })
-}
-
-export async function setPointStatus(user, pointId, status) {
-  requireAdmin(user)
-  if (!['active','archived'].includes(status)) throw badRequest('知识点状态不合法')
-  const row = (await query('UPDATE knowledge_points SET status=$1,updated_by=$2 WHERE id=$3 RETURNING *', [status,user.id,pointId])).rows[0]
-  if (!row) throw notFound('知识点')
-  return row
 }
 
 // 永久删除知识点及其分类和前置关联
@@ -253,7 +245,7 @@ export async function getPrerequisites(pointId) {
   return (await query(
     `SELECT p.id,p.slug,p.title
        FROM knowledge_prerequisites d JOIN knowledge_points p ON p.id=d.prerequisite_id
-      WHERE d.knowledge_point_id=$1 AND p.status='active' ORDER BY p.id`, [pointId],
+      WHERE d.knowledge_point_id=$1 ORDER BY p.id`, [pointId],
   )).rows
 }
 

@@ -23,7 +23,7 @@ export async function knowledgeMap(categoryId = null) {
          FROM knowledge_points p
          LEFT JOIN knowledge_point_categories pc ON pc.knowledge_point_id=p.id
          LEFT JOIN knowledge_categories c ON c.id=pc.category_id AND c.status='active'
-        WHERE p.status='active' AND ($1::bigint IS NULL OR EXISTS (
+        WHERE ($1::bigint IS NULL OR EXISTS (
           SELECT 1 FROM knowledge_point_categories scope
           JOIN subtree s ON s.id=scope.category_id WHERE scope.knowledge_point_id=p.id
         ))

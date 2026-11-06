@@ -1,6 +1,7 @@
 import * as service from '../services/knowledge.js'
 import { knowledgeMap } from '../services/knowledge-map.js'
 import { body, id, integer, string, slug, list, choice } from '../lib/validate.js'
+import { IMPORT_BODY_MAX, IMPORT_DATA_MAX } from '../lib/import-limits.js'
 
 export default async function knowledgeRoutes(app) {
   app.get('/knowledge-map', async (req, reply) => {
@@ -34,25 +35,25 @@ export default async function knowledgeRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     return service.getManaged(req.user, id(req.params.id))
   })
-  app.post('/knowledge-points/import', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.post('/knowledge-points/import', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['category_id','data'], ['category_id','data'])
     const result = await service.importPoints(req.user, id(d.category_id), d.data)
     reply.code(201)
     return result
   })
-  app.post('/knowledge-points', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.post('/knowledge-points', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async (req, reply) => {
     const d = body(req.body, ['slug','title','source'], ['slug','title','source'])
     slug(d.slug)
     string(d.title, 200)
-    string(d.source, 200000)
+    string(d.source, IMPORT_DATA_MAX)
     const result = await service.create(req.user, d)
     reply.code(201)
     return result
   })
-  app.put('/knowledge-points/:id', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/knowledge-points/:id', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['title','source'], ['title','source'])
     string(d.title, 200)
-    string(d.source, 200000)
+    string(d.source, IMPORT_DATA_MAX)
     return service.save(req.user, id(req.params.id), d)
   })
   app.delete('/knowledge-points/:id', { preHandler: [app.requireLogin] }, async (req, reply) => {
@@ -64,9 +65,9 @@ export default async function knowledgeRoutes(app) {
     reply.code(204)
   })
   app.get('/categories/:kind', async req =>
-    service.categories(choice(req.params.kind, ['knowledge','lecture'])))
+    service.categories(choice(req.params.kind, ['knowledge','book'])))
   app.post('/categories/:kind', { preHandler: [app.requireLogin] }, async (req, reply) => {
-    const kind = choice(req.params.kind, ['knowledge','lecture'])
+    const kind = choice(req.params.kind, ['knowledge','book'])
     const d = body(req.body, ['parent_id','slug','name','descr','pos'], ['slug','name'])
     if (d.parent_id != null) id(d.parent_id)
     slug(d.slug)
@@ -84,19 +85,15 @@ export default async function knowledgeRoutes(app) {
     string(d.descr, 5000, true)
     integer(d.pos)
     choice(d.status, ['active','archived'])
-    return service.updateCategory(req.user, choice(req.params.kind, ['knowledge','lecture']), id(req.params.id), d)
+    return service.updateCategory(req.user, choice(req.params.kind, ['knowledge','book']), id(req.params.id), d)
   })
-  app.patch('/knowledge-points/:id/status', { preHandler: [app.requireLogin] }, async req => {
-    const d = body(req.body, ['status'], ['status'])
-    return service.setPointStatus(req.user, id(req.params.id), choice(d.status, ['active','archived']))
-  })
-  app.put('/knowledge-points/:id/prerequisites', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/knowledge-points/:id/prerequisites', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['prerequisites'], ['prerequisites'])
-    return service.setPrerequisites(req.user, id(req.params.id), list(d.prerequisites, 100).map(id))
+    return service.setPrerequisites(req.user, id(req.params.id), list(d.prerequisites, Number.MAX_SAFE_INTEGER).map(id))
   })
   app.get('/knowledge-points/:id/prerequisites', async req => service.getPrerequisites(id(req.params.id)))
-  app.put('/knowledge-points/:id/categories', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/knowledge-points/:id/categories', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async req => {
     const d = body(req.body, ['categories'], ['categories'])
-    return service.setCategories(req.user, id(req.params.id), list(d.categories, 100).map(id))
+    return service.setCategories(req.user, id(req.params.id), list(d.categories, Number.MAX_SAFE_INTEGER).map(id))
   })
 }

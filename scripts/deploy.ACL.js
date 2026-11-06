@@ -372,7 +372,7 @@ const db = new pg.Client();
   try {
     await db.connect();
     await db.query('BEGIN READ ONLY');
-    const row = (await db.query("SELECT current_database() AS database, to_regclass('public.lectures') AS lectures, to_regclass('public.lecture_revisions') AS revisions, to_regclass('public.knowledge_points') AS points")).rows[0];
+    const row = (await db.query("SELECT current_database() AS database, to_regclass('public.books') AS lectures, to_regclass('public.book_revisions') AS revisions, to_regclass('public.knowledge_points') AS points")).rows[0];
     if (row.database !== process.argv[3] || !row.lectures || !row.revisions || !row.points) throw new Error('目标数据库名称或新版业务表不匹配');
     await db.query('COMMIT');
     console.log('目标数据库已就绪：' + row.database);
