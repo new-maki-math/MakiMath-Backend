@@ -1,6 +1,5 @@
 import { badRequest, conflict } from './errors.js'
-
-const limits = { bytes: 2 * 1024 * 1024, categories: 150, points: 1000, edges: 6000, associations: 10000 }
+import { IMPORT_DATA_MAX } from './import-limits.js'
 
 // 校验导入条目的字段并保留错误位置
 function record(value, fields, location, optional = []) {
@@ -18,8 +17,8 @@ function slugField(value, location) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) throw badRequest('导入标识名称格式不合法', location)
 }
 
-function arrayField(value, max, field) {
-  if (!Array.isArray(value) || value.length > max) throw badRequest('导入数组不合法或超出限制', { field })
+function arrayField(value, field) {
+  if (!Array.isArray(value)) throw badRequest('导入数组不合法', { field })
 }
 
 // 按依赖关系检查环路并返回稳定的拓扑顺序
@@ -46,9 +45,9 @@ function topologicalOrder(ids, edges, field) {
 
 export function validateKnowledgeImport(data) {
   record(data, ['schema_version','categories','points','edges'], { field: 'data' })
-  if (Buffer.byteLength(JSON.stringify(data), 'utf8') > limits.bytes) throw badRequest('导入数据超过大小限制', { field: 'data', max_bytes: limits.bytes })
+  if (Buffer.byteLength(JSON.stringify(data), 'utf8') > IMPORT_DATA_MAX) throw badRequest('导入数据超过大小限制', { field: 'data', max_bytes: IMPORT_DATA_MAX })
   if (data.schema_version !== 1) throw badRequest('不支持的导入格式版本', { field: 'schema_version' })
-  for (const key of ['categories','points','edges']) arrayField(data[key], limits[key], key)
+  for (const key of ['categories','points','edges']) arrayField(data[key], key)
   if (!data.points.length) throw badRequest('导入至少需要一个知识点', { field: 'points' })
   const categoryById = new Map()
   const categorySlugs = new Set()
@@ -74,7 +73,6 @@ export function validateKnowledgeImport(data) {
   const categoryOrder = topologicalOrder([...categoryById.keys()], categoryEdges, 'categories')
   const pointById = new Map()
   const pointSlugs = new Set()
-  let associations = 0
   for (const [index, point] of data.points.entries()) {
     const where = { field: 'points', index }
     record(point, ['id','slug','title','source','category_ids'], where, ['category_ids'])
@@ -82,14 +80,12 @@ export function validateKnowledgeImport(data) {
     textField(point.id, 100, { ...where, property: 'id' })
     slugField(point.slug, { ...where, property: 'slug' })
     textField(point.title, 200, { ...where, property: 'title' })
-    textField(point.source, 200000, { ...where, property: 'source' })
-    if (!Array.isArray(categoryIds) || categoryIds.length > 100) throw badRequest('知识点分类数组不合法', { ...where, property: 'category_ids' })
+    textField(point.source, IMPORT_DATA_MAX, { ...where, property: 'source' })
+    if (!Array.isArray(categoryIds)) throw badRequest('知识点分类数组不合法', { ...where, property: 'category_ids' })
     if (new Set(categoryIds).size !== categoryIds.length) throw badRequest('知识点分类不能重复', { ...where, property: 'category_ids' })
     for (const categoryId of categoryIds) {
       if (typeof categoryId !== 'string' || !categoryById.has(categoryId)) throw badRequest('知识点分类不存在于导入文件', { ...where, property: 'category_ids', id: categoryId })
     }
-    associations += Math.max(1, categoryIds.length)
-    if (associations > limits.associations) throw badRequest('导入分类关联数量超出限制', { ...where, max: limits.associations })
     if (pointById.has(point.id)) throw badRequest('知识点局部标识重复', { ...where, id: point.id })
     if (pointSlugs.has(point.slug)) throw conflict('导入知识点别名重复', { ...where, slug: point.slug })
     pointById.set(point.id, { ...point, category_ids: categoryIds, index })
