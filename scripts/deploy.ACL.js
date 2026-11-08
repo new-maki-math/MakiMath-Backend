@@ -562,22 +562,6 @@ REBUILDSQL
       -v ON_ERROR_STOP=1 \
       -f "$BACKEND_DIR/Database/schema.sql"
 
-    # 初始化增量迁移记录表并将当前已有迁移标记为已执行
-    "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-      CREATE TABLE IF NOT EXISTS _schema_migrations (
-        name text PRIMARY KEY,
-        executed_at timestamptz NOT NULL DEFAULT now()
-      );
-    "
-    if [ -d "$BACKEND_DIR/Database/migrations" ]; then
-      for mig_file in "$BACKEND_DIR/Database/migrations"/*.sql; do
-        [ -f "$mig_file" ] || continue
-        mig_name=$(basename "$mig_file")
-        "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-          INSERT INTO _schema_migrations (name) VALUES ('$mig_name') ON CONFLICT (name) DO NOTHING;
-        "
-      done
-    fi
 
   elif [ "$DB_TABLE_COUNT" = "0" ]; then
     step "初始化空数据库"
@@ -592,62 +576,10 @@ REBUILDSQL
       -v ON_ERROR_STOP=1 \
       -f "$BACKEND_DIR/Database/schema.sql"
 
-    # 初始化增量迁移记录表并将当前已有迁移标记为已执行
-    "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-      CREATE TABLE IF NOT EXISTS _schema_migrations (
-        name text PRIMARY KEY,
-        executed_at timestamptz NOT NULL DEFAULT now()
-      );
-    "
-    if [ -d "$BACKEND_DIR/Database/migrations" ]; then
-      for mig_file in "$BACKEND_DIR/Database/migrations"/*.sql; do
-        [ -f "$mig_file" ] || continue
-        mig_name=$(basename "$mig_file")
-        "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-          INSERT INTO _schema_migrations (name) VALUES ('$mig_name') ON CONFLICT (name) DO NOTHING;
-        "
-      done
-    fi
 
   elif [ "$HAS_USERS" = "t" ]; then
-    step "检测并应用增量数据库迁移"
-    echo "检测到已有业务表和 public.users，跳过全量初始化，执行增量迁移检测..."
-
-    # 确保迁移记录表存在
-    "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-      CREATE TABLE IF NOT EXISTS _schema_migrations (
-        name text PRIMARY KEY,
-        executed_at timestamptz NOT NULL DEFAULT now()
-      );
-    "
-
-    MIG_COUNT=0
-    if [ -d "$BACKEND_DIR/Database/migrations" ]; then
-      for mig_file in $(ls -1 "$BACKEND_DIR/Database/migrations"/*.sql 2>/dev/null | sort); do
-        [ -f "$mig_file" ] || continue
-        mig_name=$(basename "$mig_file")
-        mig_applied=$("$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -tA -c "
-          SELECT count(*) FROM _schema_migrations WHERE name = '$mig_name';
-        ")
-        if [ "$mig_applied" = "0" ]; then
-          echo "--> [执行迁移] $mig_name"
-          "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$mig_file"
-          "$PSQL" -h 127.0.0.1 -p 5432 -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "
-            INSERT INTO _schema_migrations (name) VALUES ('$mig_name');
-          "
-          echo "--> [迁移成功] $mig_name"
-          MIG_COUNT=$((MIG_COUNT + 1))
-        else
-          echo "增量迁移已就绪（跳过）: $mig_name"
-        fi
-      done
-    fi
-
-    if [ "$MIG_COUNT" -gt 0 ]; then
-      echo "增量迁移执行完毕，共应用 $MIG_COUNT 个新迁移脚本。"
-    else
-      echo "数据库结构已是最新，无待执行迁移。"
-    fi
+    step "检查已有数据库"
+    echo "检测到已有业务表和 public.users，跳过初始化；数据库迁移需要手动执行。"
 
   else
     echo "数据库已有 $DB_TABLE_COUNT 张 public 表，但缺少 public.users。" >&2
