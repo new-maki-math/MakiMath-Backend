@@ -9,7 +9,7 @@ import authPlugin from './plugins/auth.js'
 import payloadCryptoPlugin from './plugins/crypto.js'
 import authRoutes from './routes/auth.js'
 import knowledgeRoutes from './routes/knowledge.js'
-import lectureRoutes from './routes/books.js'
+import bookRoutes from './routes/books.js'
 import reviewRoutes from './routes/review.js'
 import searchRoutes from './routes/search.js'
 import resourceRoutes from './routes/resources.js'
@@ -44,7 +44,7 @@ export async function buildApp(options = {}) {
   await app.register(async api => {
     await api.register(authRoutes)
     await api.register(knowledgeRoutes)
-    await api.register(lectureRoutes)
+    await api.register(bookRoutes)
     await api.register(reviewRoutes)
     await api.register(searchRoutes)
     await api.register(resourceRoutes)
