@@ -1,5 +1,7 @@
 import * as service from '../services/resources.js'
-import { badRequest } from '../lib/errors.js'
+import { badRequest, HttpError, unauthorized } from '../lib/errors.js'
+import { query } from '../db/pool.js'
+import { normalizeIp } from '../lib/util.js'
 import { body, choice, id, integer, string } from '../lib/validate.js'
 
 const optionalParent = value => value === undefined || value === null || value === '' ? null : id(value)
@@ -75,6 +77,46 @@ export default async function resourceRoutes(app) {
     return result
   })
   app.delete('/resources/:id', { preHandler: [app.requireAdmin] }, async req => service.remove(req.user,id(req.params.id)))
+  app.post('/resources/:id/download-ticket', async req => {
+    const resourceId = id(req.params.id)
+    const resource = (await service.detail(req.user, resourceId)).resource
+    if (resource.kind !== 'pdf') throw badRequest('只能下载 PDF 文件')
+    const quota = await service.quota(req.user, req.ip)
+    if (!quota.unlimited && resource.size_bytes > quota.remaining_bytes) {
+      throw new HttpError(429, '下载额度不足', { code: 'DOWNLOAD_QUOTA_EXCEEDED', ...quota })
+    }
+    if (req.headers.authorization && !req.user) throw unauthorized('会话无效或已过期')
+    const session = req.user ? (await req.jwtVerify()).sid : null
+    const ip = normalizeIp(req.ip)
+    if (!ip) throw badRequest('无法识别访问来源')
+    const ticket = app.jwt.sign({ purpose: 'resource-download', resourceId, account: req.user?.id ?? null, session, ip }, { expiresIn: '60s' })
+    return { ticket }
+  })
+  app.get('/resources/:id/download', async (req, reply) => {
+    const resourceId = id(req.params.id)
+    let ticket
+    try { ticket = app.jwt.verify(string(req.query.ticket, 2048)) }
+    catch { throw unauthorized('下载链接无效或已过期') }
+    if (ticket.purpose !== 'resource-download' || ticket.resourceId !== resourceId || ticket.ip !== normalizeIp(req.ip)) {
+      throw unauthorized('下载链接无效或已过期')
+    }
+    let user = null
+    if (ticket.account !== null) {
+      if (!Number.isSafeInteger(ticket.account) || !Number.isSafeInteger(ticket.session)) throw unauthorized('下载链接无效')
+      user = (await query(`SELECT u.id,u.username,u.display_name,u.role FROM users u
+        JOIN user_sessions s ON s.user_id=u.id
+        WHERE u.id=$1 AND s.id=$2 AND u.status='active' AND s.expires_at>now()`, [ticket.account, ticket.session])).rows[0]
+      if (!user) throw unauthorized('会话无效或已过期')
+    }
+    const result = await service.content(user, resourceId, undefined, false, req.ip)
+    reply.header('Cache-Control','private, no-store')
+    reply.header('Referrer-Policy','no-referrer')
+    reply.header('X-Content-Type-Options','nosniff')
+    reply.header('Content-Disposition',`attachment; filename="document.pdf"; filename*=UTF-8''${encodeURIComponent(result.resource.name).replace(/['()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)}`)
+    reply.header('Content-Length',String(result.size))
+    reply.type('application/pdf')
+    return reply.send(result.data)
+  })
   const sendContent = async (req, reply) => {
     reply.header('Cache-Control','private, no-store')
     const mode = choice(req.query.disposition ?? 'inline', ['inline','attachment'])
