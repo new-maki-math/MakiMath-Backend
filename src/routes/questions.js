@@ -72,6 +72,10 @@ export default async function questionRoutes(app) {
     reply.header('Cache-Control','no-store')
     return service.listEntries({ ...pagination(req.query), categoryId: optionalParent(req.query.category_id) })
   })
+  app.get('/question-entries/:id/neighbors', async (req,reply) => {
+    reply.header('Cache-Control','no-store')
+    return service.entryNeighbors(id(req.params.id))
+  })
   app.post('/question-entries', { preHandler: [app.requireAdmin] }, async (req,reply) => {
     const d = body(req.body,['question_slug','category_id','source_number'],['question_slug','category_id'])
     const result = await service.createEntry(req.user,{ question_slug: slug(d.question_slug), category_id: id(d.category_id), source_number: d.source_number === undefined ? '' : text(d.source_number,200) })

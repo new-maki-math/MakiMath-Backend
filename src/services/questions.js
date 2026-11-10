@@ -1,10 +1,11 @@
 import { query, tx } from '../db/pool.js'
 import { badRequest, conflict, notFound } from '../lib/errors.js'
 import { requireAdmin } from './access.js'
+import { nextPosition } from './question-order.js'
 
 const stamp = `to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS updated_at`
 const categoryFields = `id,parent_id,slug,name,pos,created_at,${stamp}`
-const questionFields = `id,slug,difficulty,stem_source,solution_source,conclusion_source,pitfalls_source,created_by,updated_by,created_at,${stamp}`
+const questionFields = `id,slug,difficulty,stem_source,focus_source,solution_source,conclusion_source,pitfalls_source,created_by,updated_by,created_at,${stamp}`
 const entryFields = `id,category_id,question_id,source_number,pos,created_at,${stamp}`
 
 async function lockWrites(db) {
@@ -87,7 +88,8 @@ export async function createCategory(user, data) {
   return tx(async db => {
     await lockWrites(db)
     if (data.parent_id !== null) await category(db,data.parent_id,true)
-    return (await db.query(`INSERT INTO question_categories(parent_id,slug,name,pos) VALUES ($1,$2,$3,$4) RETURNING ${categoryFields}`, [data.parent_id,data.slug,data.name,data.pos])).rows[0]
+    const pos = data.pos ?? await nextPosition(db,'question_categories','parent_id',data.parent_id)
+    return (await db.query(`INSERT INTO question_categories(parent_id,slug,name,pos) VALUES ($1,$2,$3,$4) RETURNING ${categoryFields}`, [data.parent_id,data.slug,data.name,pos])).rows[0]
   })
 }
 
@@ -148,13 +150,35 @@ export async function listEntries(options) {
   })
 }
 
+export async function entryNeighbors(entryId) {
+  const row = (await query(`SELECT * FROM (
+    SELECT e.id,
+      lag(e.id) OVER ordering AS previous_entry_id,
+      lag(e.question_id) OVER ordering AS previous_question_id,
+      lag(e.source_number) OVER ordering AS previous_source_number,
+      lag(q.slug) OVER ordering AS previous_slug,
+      lead(e.id) OVER ordering AS next_entry_id,
+      lead(e.question_id) OVER ordering AS next_question_id,
+      lead(e.source_number) OVER ordering AS next_source_number,
+      lead(q.slug) OVER ordering AS next_slug
+    FROM question_entries e JOIN questions q ON q.id=e.question_id
+    WHERE e.category_id=(SELECT category_id FROM question_entries WHERE id=$1)
+    WINDOW ordering AS (ORDER BY e.pos,e.id)
+  ) neighbors WHERE id=$1`, [entryId])).rows[0]
+  if (!row) throw notFound('题目来源')
+  return {
+    previous: row.previous_entry_id === null ? null : { id: row.previous_entry_id, question_id: row.previous_question_id, source_number: row.previous_source_number, slug: row.previous_slug },
+    next: row.next_entry_id === null ? null : { id: row.next_entry_id, question_id: row.next_question_id, source_number: row.next_source_number, slug: row.next_slug },
+  }
+}
+
 export async function createQuestion(user, data) {
   requireAdmin(user)
   return tx(async db => {
     await lockWrites(db)
     await category(db,data.category_id,true)
-    const row = (await db.query(`INSERT INTO questions(slug,difficulty,stem_source,solution_source,conclusion_source,pitfalls_source,created_by,updated_by)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$7) RETURNING ${questionFields}`, [data.slug,data.difficulty,data.stem_source,data.solution_source,data.conclusion_source,data.pitfalls_source,user.id])).rows[0]
+    const row = (await db.query(`INSERT INTO questions(slug,difficulty,stem_source,focus_source,solution_source,conclusion_source,pitfalls_source,created_by,updated_by)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING ${questionFields}`, [data.slug,data.difficulty,data.stem_source,data.focus_source,data.solution_source,data.conclusion_source,data.pitfalls_source,user.id])).rows[0]
     await replaceKnowledge(db,row.id,data.knowledge_slugs)
     const entry = (await db.query(`INSERT INTO question_entries(category_id,question_id,source_number) VALUES ($1,$2,$3) RETURNING ${entryFields}`, [data.category_id,row.id,data.source_number])).rows[0]
     return { question: row, entry }
@@ -188,8 +212,8 @@ export async function updateQuestion(user, questionId, data) {
     await lockWrites(db)
     const old = await question(db,questionId,true)
     if (old.updated_at !== data.updated_at) throw conflict('题目已修改请重新加载')
-    const row = (await db.query(`UPDATE questions SET difficulty=$1,stem_source=$2,solution_source=$3,conclusion_source=$4,pitfalls_source=$5,updated_by=$6 WHERE id=$7 RETURNING ${questionFields}`,
-      [data.difficulty,data.stem_source,data.solution_source,data.conclusion_source,data.pitfalls_source,user.id,questionId])).rows[0]
+    const row = (await db.query(`UPDATE questions SET difficulty=$1,stem_source=$2,focus_source=COALESCE($3,focus_source),solution_source=$4,conclusion_source=$5,pitfalls_source=$6,updated_by=$7 WHERE id=$8 RETURNING ${questionFields}`,
+      [data.difficulty,data.stem_source,data.focus_source ?? null,data.solution_source,data.conclusion_source,data.pitfalls_source,user.id,questionId])).rows[0]
     await replaceKnowledge(db,questionId,data.knowledge_slugs)
     return (await attachDetails(db,[row]))[0]
   })
