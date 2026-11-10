@@ -2,6 +2,7 @@ import * as service from '../services/books.js'
 import { badRequest } from '../lib/errors.js'
 import { body, id, integer, string, slug, object, list, choice } from '../lib/validate.js'
 import { parseCover } from '../lib/lecture-cover.js'
+import { IMPORT_BODY_MAX, IMPORT_DATA_MAX } from '../lib/import-limits.js'
 
 function occurrence(value) {
   if (value !== undefined && (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))) {
@@ -17,9 +18,10 @@ function validateTree(chapters) {
     string(chapter.slug, 100)
     for (const field of ['tag','title','summary']) if (chapter[field] !== undefined) string(chapter[field], 5000, true)
     for (const section of list(chapter.sections, 200)) {
-      body(section, ['occurrence_id','slug','tag','title','summary','source'], ['slug'])
+      body(section, ['occurrence_id','slug','tag','title','summary','source','animation_source'], ['slug'])
       occurrence(section.occurrence_id)
       string(section.slug, 100)
+      if (section.animation_source !== undefined) string(section.animation_source, IMPORT_DATA_MAX, true)
       if (section.source !== undefined) string(section.source, 200000, true)
       else if (!section.occurrence_id) throw badRequest('新小节必须提供源码')
       for (const field of ['tag','title','summary']) if (section[field] !== undefined) string(section[field], 5000, true)
@@ -53,12 +55,13 @@ function validateImport(data) {
     for (const field of ['tag','title','summary']) string(chapter[field], 5000, true)
     const sectionSlugs = new Set()
     for (const section of list(chapter.sections, 200)) {
-      body(section, ['slug','tag','title','summary','source'], ['slug','tag','title','summary','source'])
+      body(section, ['slug','tag','title','summary','source','animation_source'], ['slug','tag','title','summary','source'])
       string(section.slug, 100)
       if (sectionSlugs.has(section.slug)) throw badRequest('小节标识重复')
       sectionSlugs.add(section.slug)
       for (const field of ['tag','title','summary']) string(section[field], 5000, true)
       string(section.source, 200000, true)
+      if (section.animation_source !== undefined) string(section.animation_source, IMPORT_DATA_MAX, true)
       if (++count > 2000) throw badRequest('讲义小节数量超出限制')
     }
   }
@@ -80,7 +83,7 @@ export default async function lectureRoutes(app) {
     reply.header('Cache-Control', 'no-store')
     slug(req.params.slug)
     const revisionId = req.query.revision_id === undefined ? null : id(req.query.revision_id)
-    return service.lectureOutline(req.user, req.params.slug, revisionId)
+    return service.lectureOutline(req.user, req.params.slug, revisionId, req.query.include_animation !== '0')
   })
   app.get('/books/by-slug/:slug/print-data', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
@@ -89,6 +92,11 @@ export default async function lectureRoutes(app) {
     const section = req.query.section_slug === undefined ? null : string(req.query.section_slug, 100)
     if (section !== null && chapter === null) throw badRequest('指定小节时必须提供章节标识')
     return service.printData(req.user, req.params.slug, id(req.query.revision_id), id(req.query.edit_version), chapter, section)
+  })
+  app.get('/books/by-slug/:slug/revisions/:revisionId/animation-base', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store')
+    slug(req.params.slug)
+    return service.lectureAnimationBase(req.user, req.params.slug, id(req.params.revisionId), id(req.query.edit_version))
   })
   app.get('/books/by-slug/:slug/revisions/:revisionId/chapters/:chapterSlug/sections/:sectionSlug', async (req, reply) => {
     reply.header('Cache-Control', 'no-store')
@@ -106,7 +114,7 @@ export default async function lectureRoutes(app) {
     reply.code(201)
     return result
   })
-  app.post('/books/import', { preHandler: [app.requireLogin] }, async (req, reply) => {
+  app.post('/books/import', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async (req, reply) => {
     const result = await service.importLecture(req.user, validateImport(req.body))
     reply.code(201)
     return result
@@ -133,17 +141,18 @@ export default async function lectureRoutes(app) {
   })
   app.delete('/book-revisions/:id/cover', { preHandler: [app.requireLogin] }, async req =>
     service.setCover(req.user, id(req.params.id), id(req.query.edit_version), null))
-  app.put('/book-revisions/:id/sections/:occurrenceId', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/book-revisions/:id/sections/:occurrenceId', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async req => {
     occurrence(req.params.occurrenceId)
-    const fields = ['edit_version','slug','tag','title','summary','source']
-    const d = body(req.body, fields, fields)
+    const fields = ['edit_version','slug','tag','title','summary','source','animation_source']
+    const d = body(req.body, fields, fields.filter(field => field !== 'animation_source'))
     integer(d.edit_version, 1)
     string(d.slug, 100)
     for (const field of ['tag','title','summary']) string(d[field], 5000, true)
     string(d.source, 200000, true)
+    if (d.animation_source !== undefined) string(d.animation_source, IMPORT_DATA_MAX, true)
     return service.saveSection(req.user, id(req.params.id), req.params.occurrenceId, d)
   })
-  app.put('/book-revisions/:id', { preHandler: [app.requireLogin] }, async req => {
+  app.put('/book-revisions/:id', { bodyLimit: IMPORT_BODY_MAX, preHandler: [app.requireLogin] }, async req => {
     const fields = ['edit_version','title','subtitle','descr','category_id','metadata','change_note','chapters']
     const d = body(req.body, fields, fields)
     integer(d.edit_version, 1)

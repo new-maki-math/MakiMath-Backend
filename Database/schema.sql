@@ -401,6 +401,7 @@ CREATE TABLE book_sections (
   title               text        NOT NULL DEFAULT '', -- 小节标题
   summary             text        NOT NULL DEFAULT '', -- 小节说明
   source              text        NOT NULL DEFAULT '', -- 小节完整源码
+  animation_source    text        NOT NULL DEFAULT '', -- 小节分步动画代码
   pos                 integer     NOT NULL CHECK (pos >= 0), -- 小节顺序
   created_at          timestamptz NOT NULL DEFAULT now(), -- 创建时间
   updated_at          timestamptz NOT NULL DEFAULT now(), -- 更新时间

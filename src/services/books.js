@@ -12,8 +12,9 @@ async function snapshot(db, revisionId) {
   return { revision, chapters: chapters.map(chapter => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapter.id) })) }
 }
 
-async function outlineSnapshot(db, revisionId) {
-  const revision = (await db.query("SELECT r.*,r.metadata - 'cover' AS metadata,(c.data IS NOT NULL OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover,encode(sha256(c.data),'hex') AS cover_hash,r.metadata->'cover' AS legacy_cover FROM book_revisions r LEFT JOIN book_revision_covers c ON c.book_revision_id=r.id WHERE r.id=$1", [revisionId])).rows[0]
+async function outlineSnapshot(db, revisionId, includeAnimation = true) {
+  const metadataExpression = includeAnimation ? "r.metadata - 'cover'" : "r.metadata - 'cover' - 'animation_base'"
+  const revision = (await db.query(`SELECT r.*,${metadataExpression} AS metadata,(c.data IS NOT NULL OR NULLIF(r.metadata->>'cover','') IS NOT NULL) AS has_cover,encode(sha256(c.data),'hex') AS cover_hash,r.metadata->'cover' AS legacy_cover FROM book_revisions r LEFT JOIN book_revision_covers c ON c.book_revision_id=r.id WHERE r.id=$1`, [revisionId])).rows[0]
   if (!revision) throw notFound('讲义版本')
   revision.cover_hash ??= legacyCoverHash(revision.legacy_cover)
   delete revision.legacy_cover
@@ -135,11 +136,11 @@ async function selectLectureBySlug(db, user, lectureSlug, requestedRevisionId) {
   return { lecture, selected }
 }
 
-export async function lectureOutline(user, lectureSlug, revisionId = null) {
+export async function lectureOutline(user, lectureSlug, revisionId = null, includeAnimation = true) {
   return tx(async db => {
     await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
     const { lecture, selected } = await selectLectureBySlug(db, user, lectureSlug, revisionId)
-    return { book: lecture, ...(await outlineSnapshot(db, selected.id)) }
+    return { book: lecture, ...(await outlineSnapshot(db, selected.id, includeAnimation)) }
   })
 }
 
@@ -161,6 +162,7 @@ export async function printData(user, lectureSlug, revisionId, editVersion, chap
     )).rows
     if (sectionSlug !== null && !sections.length) throw notFound('讲义小节')
     delete revision.metadata.cover
+    delete revision.metadata.animation_base
     const result = { book: lecture, revision, chapters: chapters.map(({ id: chapterId, ...chapter }) => ({ ...chapter, sections: sections.filter(section => section.chapter_id === chapterId).map(({ chapter_id, ...section }) => section) })) }
     if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 16 * 1024 * 1024) throw badRequest('讲义内容过大请缩小打印范围')
     return result
@@ -174,12 +176,22 @@ export async function lectureSection(user, lectureSlug, revisionId, chapterSlug,
     const revision = (await db.query('SELECT edit_version FROM book_revisions WHERE id=$1', [selected.id])).rows[0]
     if (revision.edit_version !== editVersion) throw conflict('讲义内容已修改请重新加载目录')
     const section = (await db.query(
-      `SELECT s.occurrence_id,s.source FROM book_sections s
+      `SELECT s.occurrence_id,s.source,s.animation_source FROM book_sections s
        JOIN book_chapters c ON c.id=s.chapter_id AND c.book_revision_id=s.book_revision_id
        WHERE s.book_revision_id=$1 AND c.slug=$2 AND s.slug=$3`, [selected.id,chapterSlug,sectionSlug],
     )).rows[0]
     if (!section) throw notFound('讲义小节')
     return { revision_id: selected.id, edit_version: revision.edit_version, ...section }
+  })
+}
+
+export async function lectureAnimationBase(user, lectureSlug, revisionId, editVersion) {
+  return tx(async db => {
+    await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const { selected } = await selectLectureBySlug(db, user, lectureSlug, revisionId)
+    const row = (await db.query("SELECT edit_version,metadata->'animation_base' AS animation_base FROM book_revisions WHERE id=$1", [selected.id])).rows[0]
+    if (row.edit_version !== editVersion) throw conflict('讲义内容已修改请重新加载目录')
+    return { revision_id: selected.id, edit_version: row.edit_version, animation_base: row.animation_base }
   })
 }
 
@@ -227,9 +239,9 @@ export async function saveSection(user, revisionId, occurrenceId, data) {
     if (revision.status !== 'draft' || revision.source_draft_id !== null) throw conflict('只有工作草稿可以编辑')
     if (revision.edit_version !== data.edit_version) throw conflict('草稿已被修改请重新加载')
     const section = (await db.query(
-      `UPDATE book_sections SET slug=$1,tag=$2,title=$3,summary=$4,source=$5
+      `UPDATE book_sections SET slug=$1,tag=$2,title=$3,summary=$4,source=$5,animation_source=COALESCE($8,animation_source)
        WHERE book_revision_id=$6 AND occurrence_id=$7 RETURNING *`,
-      [data.slug,data.tag,data.title,data.summary,data.source,revisionId,occurrenceId],
+      [data.slug,data.tag,data.title,data.summary,data.source,revisionId,occurrenceId,data.animation_source ?? null],
     )).rows[0]
     if (!section) throw notFound('讲义小节')
     const updated = (await db.query('UPDATE book_revisions SET edit_version=edit_version+1 WHERE id=$1 RETURNING edit_version', [revisionId])).rows[0]
@@ -252,9 +264,9 @@ async function insertTree(db, revisionId, chapters) {
     )).rows[0]
     for (const [j, section] of chapter.sections.entries()) {
       await db.query(
-        `INSERT INTO book_sections(book_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,source,pos)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [revisionId, ch.id, section.occurrence_id ?? randomUUID(), section.slug, section.tag ?? '', section.title ?? '', section.summary ?? '', section.source, j],
+        `INSERT INTO book_sections(book_revision_id,chapter_id,occurrence_id,slug,tag,title,summary,source,pos,animation_source)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [revisionId, ch.id, section.occurrence_id ?? randomUUID(), section.slug, section.tag ?? '', section.title ?? '', section.summary ?? '', section.source, j, section.animation_source ?? ''],
       )
     }
   }
@@ -309,7 +321,7 @@ export async function exportRevision(user, revisionId) {
       book: { slug: lecture.slug, title: selected.title, subtitle: selected.subtitle, summary: selected.descr, kind: lecture.kind, metadata },
       chapters: tree.chapters.map(chapter => ({
         slug: chapter.slug, tag: chapter.tag, title: chapter.title, summary: chapter.summary,
-        sections: chapter.sections.map(section => ({ slug: section.slug, tag: section.tag, title: section.title, summary: section.summary, source: section.source })),
+        sections: chapter.sections.map(section => ({ slug: section.slug, tag: section.tag, title: section.title, summary: section.summary, source: section.source, animation_source: section.animation_source })),
       })),
     }
   })
@@ -348,12 +360,15 @@ export async function save(user, revisionId, data) {
     const revision = (await db.query('SELECT * FROM book_revisions WHERE id=$1 FOR UPDATE', [revisionId])).rows[0]
     if (revision.status !== 'draft') throw conflict('只有草稿可以编辑')
     if (revision.edit_version !== data.edit_version) throw conflict('草稿已被修改请重新加载')
-    const oldSources = new Map((await db.query('SELECT occurrence_id,source FROM book_sections WHERE book_revision_id=$1', [revisionId])).rows.map(section => [section.occurrence_id,section.source]))
+    const oldSources = new Map((await db.query('SELECT occurrence_id,source,animation_source FROM book_sections WHERE book_revision_id=$1', [revisionId])).rows.map(section => [section.occurrence_id,section]))
     for (const chapter of data.chapters) {
       for (const section of chapter.sections) {
         if (section.source === undefined) {
           if (!oldSources.has(section.occurrence_id)) throw conflict('小节不存在请重新加载')
-          section.source = oldSources.get(section.occurrence_id)
+          section.source = oldSources.get(section.occurrence_id).source
+        }
+        if (section.animation_source === undefined && oldSources.has(section.occurrence_id)) {
+          section.animation_source = oldSources.get(section.occurrence_id).animation_source
         }
       }
     }
