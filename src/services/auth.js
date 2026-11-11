@@ -113,12 +113,15 @@ export async function revokeInvitation(user, inviteId) {
   return row
 }
 
-export async function auditLogs(user, limit) {
+export async function auditLogs(user, limit, offset = null) {
   requireAdmin(user)
-  return (await query(
-    'SELECT id,user_id,username,user_role,method,path,status_code,duration_ms,ip_address,user_agent,payload,created_at FROM audit_logs ORDER BY id DESC LIMIT $1',
-    [limit],
-  )).rows
+  const list = query(
+    'SELECT id,user_id,username,user_role,method,path,status_code,duration_ms,ip_address,user_agent,payload,created_at FROM audit_logs ORDER BY id DESC LIMIT $1 OFFSET $2',
+    [limit, offset ?? 0],
+  )
+  if (offset === null) return (await list).rows
+  const [items, count] = await Promise.all([list, query('SELECT count(*) AS total FROM audit_logs')])
+  return { items: items.rows, total: Number(count.rows[0].total) }
 }
 
 export async function setUserStatus(user, targetId, status) {

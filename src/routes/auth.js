@@ -84,7 +84,8 @@ export default async function authRoutes(app) {
     service.revokeInvitation(req.user, id(req.params.id)))
   app.get('/audit-logs', { preHandler: [app.requireLogin] }, async req => {
     const limit = req.query.limit === undefined ? 20 : Number(req.query.limit)
-    return service.auditLogs(req.user, integer(limit, 1, 100))
+    const offset = req.query.offset === undefined ? null : integer(Number(req.query.offset), 0, Number.MAX_SAFE_INTEGER)
+    return service.auditLogs(req.user, integer(limit, 1, 100), offset)
   })
 
   app.get('/users', { preHandler: [app.requireLogin] }, async req => service.listUsers(req.user))
